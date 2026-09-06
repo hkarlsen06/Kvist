@@ -1,6 +1,6 @@
 # Development Instructions
 
-Always install the newest build to /Applications after making changes.
+After changes affecting the runnable app, build and install the newest build to /Applications. Documentation-only or instruction-only edits do not require a rebuild or install.
 
 ## Modal dialogs
 

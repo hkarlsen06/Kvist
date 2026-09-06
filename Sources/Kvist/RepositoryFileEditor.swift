@@ -957,6 +957,40 @@ private final class ScrollTrackingQuickLookPreviewView: QLPreviewView {
     }
 }
 
+struct RepositoryFilePreview: View {
+    let url: URL
+    var scrollSynchronizer: QuickLookPreviewScrollSynchronizer?
+
+    @ViewBuilder
+    var body: some View {
+        if RepositoryFileLoader.requiresNativeImagePreview(at: url) {
+            RepositoryNativeImagePreview(url: url)
+        } else {
+            RepositoryQuickLookPreview(
+                url: url,
+                scrollSynchronizer: scrollSynchronizer
+            )
+        }
+    }
+}
+
+private struct RepositoryNativeImagePreview: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> NSImageView {
+        let imageView = NSImageView()
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.animates = true
+        imageView.image = NSImage(contentsOf: url)
+        return imageView
+    }
+
+    func updateNSView(_ imageView: NSImageView, context: Context) {
+        imageView.image = NSImage(contentsOf: url)
+    }
+}
+
 struct RepositoryQuickLookPreview: NSViewRepresentable {
     let url: URL
     var scrollSynchronizer: QuickLookPreviewScrollSynchronizer?

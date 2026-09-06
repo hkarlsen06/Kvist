@@ -1175,7 +1175,7 @@ private struct RepositoryEditorPanel: View {
                     .equatable()
             } else if model.detailKind == .preview,
                       let url = model.selectedRepositoryFileURL {
-                RepositoryQuickLookPreview(url: url)
+                RepositoryFilePreview(url: url)
                     .padding(RepositoryFileLoader.isImage(at: url) ? 20 : 0)
                     .background(AppTheme.diffCanvas)
             } else {
@@ -1667,7 +1667,7 @@ private struct ConflictWholeFilePane: View {
                     LargeSourceDocument(text: text, scrollRequest: nil)
                         .equatable()
                 case .quickLook:
-                    RepositoryQuickLookPreview(url: version.url)
+                    RepositoryFilePreview(url: version.url)
                         .padding(RepositoryFileLoader.isImage(at: version.url) ? 16 : 0)
                 case .message(let message):
                     wholeFileMessage(
@@ -2162,7 +2162,7 @@ private struct GitFileComparisonPreview: View {
                 .fill(AppTheme.edge)
                 .frame(height: 1)
 
-            RepositoryQuickLookPreview(
+            RepositoryFilePreview(
                 url: version.url,
                 scrollSynchronizer: scrollSynchronizer
             )

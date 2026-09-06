@@ -613,12 +613,17 @@ final class RepositoryFileEditorTests: XCTestCase {
 
     func testImageDetectionUsesSystemContentType() throws {
         let imageURL = repositoryURL.appendingPathComponent("preview.png")
+        let webPURL = repositoryURL.appendingPathComponent("preview.WEBP")
         let textURL = repositoryURL.appendingPathComponent("notes.txt")
         try Data().write(to: imageURL)
+        try Data().write(to: webPURL)
         try Data().write(to: textURL)
 
         XCTAssertTrue(RepositoryFileLoader.isImage(at: imageURL))
+        XCTAssertTrue(RepositoryFileLoader.isImage(at: webPURL))
         XCTAssertFalse(RepositoryFileLoader.isImage(at: textURL))
+        XCTAssertFalse(RepositoryFileLoader.requiresNativeImagePreview(at: imageURL))
+        XCTAssertTrue(RepositoryFileLoader.requiresNativeImagePreview(at: webPURL))
     }
 
     func testDiffNavigationFindsFirstNewFileLine() {

@@ -309,6 +309,10 @@ enum RepositoryFileLoader {
         return contentType.conforms(to: .image)
     }
 
+    static func requiresNativeImagePreview(at url: URL) -> Bool {
+        url.pathExtension.caseInsensitiveCompare("webp") == .orderedSame
+    }
+
     static func prefersGitPreview(for urls: [URL]) -> Bool {
         guard !urls.isEmpty else { return false }
         if urls.contains(where: prefersTextDiff) { return false }
