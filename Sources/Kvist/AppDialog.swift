@@ -17,6 +17,7 @@ struct AppDialogDisclosure {
     let title: String
     let summary: String
     let text: String
+    var isDiff = true
 }
 
 struct AppDialogField {
@@ -197,7 +198,8 @@ enum AppDialog {
             disclosure: AppDialogDisclosure(
                 title: "Output",
                 summary: "Full command output",
-                text: details
+                text: details,
+                isDiff: false
             ),
             actions: [
                 AppDialogAction(title: "Copy Details", role: .secondary),
@@ -212,10 +214,10 @@ enum AppDialog {
 }
 
 @MainActor
-private final class AppDialogDisclosureAccessoryView: NSView {
+final class AppDialogDisclosureAccessoryView: NSView {
     private let disclosure: AppDialogDisclosure
     private let disclosureButton: NSButton
-    private let diffView: NSHostingView<AnyView>
+    private let diffView: NSView
     private var isExpanded = false
 
     init(disclosure: AppDialogDisclosure) {
@@ -225,10 +227,36 @@ private final class AppDialogDisclosureAccessoryView: NSView {
             target: nil,
             action: nil
         )
-        diffView = NSHostingView(rootView: AnyView(
-            DiffDocument(text: disclosure.text)
-                .preferredColorScheme(.dark)
-        ))
+        if disclosure.isDiff {
+            diffView = NSHostingView(rootView: AnyView(
+                DiffDocument(text: disclosure.text)
+                    .preferredColorScheme(.dark)
+            ))
+        } else {
+            // runModal blocks main-actor tasks. Command output must be installed
+            // synchronously so diagnostics cannot remain on a loading placeholder.
+            let scrollView = NSScrollView()
+            scrollView.hasVerticalScroller = true
+            scrollView.drawsBackground = true
+            scrollView.backgroundColor = AppTheme.diffCanvasNSColor
+            let textView = NSTextView(usingTextLayoutManager: true)
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.isRichText = false
+            textView.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+            textView.textColor = .labelColor
+            textView.backgroundColor = AppTheme.diffCanvasNSColor
+            textView.textContainerInset = NSSize(width: 12, height: 8)
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            SourceDocument.configureWrapping(in: textView, scrollView: scrollView)
+            textView.string = disclosure.text
+            textView.setAccessibilityLabel(disclosure.summary)
+            scrollView.documentView = textView
+            scrollView.appearance = NSAppearance(named: .darkAqua)
+            diffView = scrollView
+        }
         super.init(frame: NSRect(origin: .zero, size: Self.collapsedSize))
 
         disclosureButton.target = self
@@ -249,7 +277,7 @@ private final class AppDialogDisclosureAccessoryView: NSView {
         diffView.wantsLayer = true
         diffView.layer?.cornerRadius = 5
         diffView.layer?.masksToBounds = true
-        diffView.setAccessibilityLabel("Unsaved changes diff")
+        diffView.setAccessibilityLabel(disclosure.summary)
         addSubview(diffView)
     }
 

@@ -1890,6 +1890,30 @@ final class GitClientTests: XCTestCase {
     }
 
     @MainActor
+    func testLinkAndPublishToLocalRemoteDoesNotPresentAnError() async throws {
+        let bareURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KvistLinkOrigin-\(UUID().uuidString).git")
+        defer { try? FileManager.default.removeItem(at: bareURL) }
+        try git(["init", "--bare", bareURL.path])
+        try git(["commit", "--allow-empty", "-m", "Initial commit"])
+        let client = GitClient(repositoryURL: repositoryURL)
+        try client.linkOrigin(to: bareURL.path)
+        let model = RepositoryModel(restoresLastRepository: false, persistsLastRepository: false)
+        await model.openRepository(repositoryURL)
+
+        let published = await model.publish()
+
+        XCTAssertTrue(published)
+        XCTAssertTrue(model.hasUpstream)
+        XCTAssertNil(model.errorPresentation)
+        XCTAssertEqual(
+            try git(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines),
+            try git(["--git-dir", bareURL.path, "rev-parse", "refs/heads/main"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    @MainActor
     func testCommitPushAndSyncPublishBranchesWithoutUpstreams() async throws {
         let bareURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("KvistCommitActionsOrigin-\(UUID().uuidString).git")

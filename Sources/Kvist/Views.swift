@@ -2852,7 +2852,8 @@ private struct RepositoryTopBar: View {
                     tabItems
                 }
             }
-            .scrollIndicators(.hidden)
+            // `.hidden` can still show a legacy scroller when a mouse is used.
+            .scrollIndicators(.never)
             .onChange(of: tabsModel.activeTabID) {
                 pendingTabScroll?.cancel()
                 let tabID = tabsModel.activeTabID
