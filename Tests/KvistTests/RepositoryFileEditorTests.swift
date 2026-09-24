@@ -1003,10 +1003,9 @@ final class RepositoryFileEditorTests: XCTestCase {
         XCTAssertTrue(model.isRepositoryFileDirty)
         XCTAssertNil(model.selectedRepositoryFileURL)
         await model.saveRepositoryFile()
-        XCTAssertEqual(
-            model.errorMessage,
+        XCTAssertTrue(model.errorPresentation?.details?.contains(
             "Kvist can only save files inside this repository."
-        )
+        ) == true)
     }
 
     @MainActor

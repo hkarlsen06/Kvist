@@ -148,9 +148,10 @@ final class AICommitMessagePreferencesTests: XCTestCase {
         XCTAssertEqual(found.exitCode, 0, found.output)
         XCTAssertTrue(found.output.contains("{\"message\":\"feat: add stub\"}"), found.output)
 
-        let missing = try run("codex")
+        let missingName = "kvist-missing-cli-\(UUID().uuidString)"
+        let missing = try run(missingName)
         XCTAssertEqual(missing.exitCode, 127, missing.output)
-        XCTAssertTrue(missing.output.contains("codex: command not found"), missing.output)
+        XCTAssertTrue(missing.output.contains("\(missingName): command not found"), missing.output)
         XCTAssertTrue(missing.output.contains("Remote PATH:"), missing.output)
     }
 
