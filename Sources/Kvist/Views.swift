@@ -1167,9 +1167,12 @@ private struct RepositoryEditorPanel: View {
             } else if let conflictResolution = model.conflictResolution {
                 ConflictResolverView(session: conflictResolution)
             } else if model.detailKind == .diff,
-                      model.gitFileDetailMode == .preview,
-                      let preview = model.gitFilePreview {
-                GitFileComparisonPreview(preview: preview)
+                      let preview = model.gitFilePreview,
+                      model.gitFileDetailMode == .preview || preview.isImage {
+                GitFileComparisonPreview(
+                    preview: preview,
+                    showsLatestOnly: preview.isImage && model.gitFileDetailMode == .preview
+                )
             } else if model.detailKind == .diff {
                 DiffDocument(text: model.detailText)
                     .equatable()
@@ -2118,15 +2121,16 @@ private struct ConflictCodeText: View {
 
 private struct GitFileComparisonPreview: View {
     let preview: GitFilePreview
+    var showsLatestOnly = false
     @State private var scrollSynchronizer = QuickLookPreviewScrollSynchronizer()
 
     var body: some View {
         HStack(spacing: 0) {
-            if let old = preview.old {
+            if let old = preview.old, !showsLatestOnly || preview.new == nil {
                 versionPane(old)
             }
 
-            if preview.old != nil, preview.new != nil {
+            if preview.old != nil, preview.new != nil, !showsLatestOnly {
                 Rectangle()
                     .fill(AppTheme.edge)
                     .frame(width: 1)

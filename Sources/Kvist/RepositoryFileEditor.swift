@@ -977,17 +977,48 @@ struct RepositoryFilePreview: View {
 private struct RepositoryNativeImagePreview: NSViewRepresentable {
     let url: URL
 
-    func makeNSView(context: Context) -> NSImageView {
+    func makeNSView(context: Context) -> NSScrollView {
         let imageView = NSImageView()
         imageView.imageAlignment = .alignCenter
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.animates = true
         imageView.image = NSImage(contentsOf: url)
-        return imageView
+
+        let scrollView = ImageZoomScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.allowsMagnification = true
+        scrollView.minMagnification = 1
+        scrollView.maxMagnification = 16
+        scrollView.documentView = imageView
+        context.coordinator.url = url
+        return scrollView
     }
 
-    func updateNSView(_ imageView: NSImageView, context: Context) {
-        imageView.image = NSImage(contentsOf: url)
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard context.coordinator.url != url else { return }
+        context.coordinator.url = url
+        (scrollView.documentView as? NSImageView)?.image = NSImage(contentsOf: url)
+        scrollView.magnification = 1
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var url: URL?
+    }
+}
+
+/// Keeps the image view the size of the visible area at 1x, so the image
+/// fits by default and pinching magnifies it from there.
+private final class ImageZoomScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        documentView?.setFrameSize(contentSize)
     }
 }
 

@@ -1550,7 +1550,9 @@ final class RepositoryModel: ObservableObject {
         clearGitFilePreview()
         gitFilePreview = preview
         gitPreviewDirectoryStore.insert(preview)
-        gitFileDetailMode = preview?.prefersPreview == true ? .preview : .diff
+        gitFileDetailMode = preview?.prefersPreview == true && preview?.isImage == false
+            ? .preview
+            : .diff
     }
 
     private func clearGitFilePreview(removingFiles: Bool = true) {

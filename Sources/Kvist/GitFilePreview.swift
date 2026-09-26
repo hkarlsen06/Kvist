@@ -30,6 +30,13 @@ struct GitFilePreview: Equatable, Sendable {
         old != nil || new != nil
     }
 
+    /// Git can only say "Binary files differ" for images, so Diff mode shows
+    /// both versions side by side instead.
+    var isImage: Bool {
+        let urls = [old?.url, new?.url].compactMap { $0 }
+        return !urls.isEmpty && urls.allSatisfy(RepositoryFileLoader.isImage(at:))
+    }
+
     func removeTemporaryFiles() {
         guard let temporaryDirectoryURL else { return }
         try? FileManager.default.removeItem(at: temporaryDirectoryURL)
