@@ -35,6 +35,14 @@ final class ConflictResolutionTests: XCTestCase {
         )
     }
 
+    func testParserKeepsMarkdownUnderlinesAsContent() throws {
+        let text = "<<<<<<< HEAD\nTitle\n==========\n=======\nOther\n>>>>>>> topic\n"
+        let document = try XCTUnwrap(ConflictDocument.parse(path: "README.md", text: text))
+
+        XCTAssertEqual(document.hunks.first?.currentText, "Title\n==========\n")
+        XCTAssertEqual(document.hunks.first?.incomingText, "Other\n")
+    }
+
     func testParserRecordsWorkingFileLineNumbers() throws {
         let document = try XCTUnwrap(ConflictDocument.parse(path: "file.ts", text: source))
 

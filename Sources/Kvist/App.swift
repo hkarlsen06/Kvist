@@ -10,8 +10,8 @@ struct KvistApp: App {
     @State private var hasPresentedInitialFrame = false
 
     init() {
-        // Writing to a child process whose stdin has closed — an `ssh` that failed
-        // to connect, a helper that exited early — otherwise kills the app outright
+        // Writing to a child process whose stdin has closed, such as an `ssh` that
+        // failed to connect or a helper that exited early, otherwise kills the app
         // with SIGPIPE, before any Swift error can be thrown. Ignoring it turns
         // those writes into an EPIPE the caller can handle.
         signal(SIGPIPE, SIG_IGN)
@@ -31,25 +31,27 @@ struct KvistApp: App {
         } else {
             defaults = .standard
         }
-        let restoresWorkspace = defaults.object(forKey: "restoreWorkspaceOnLaunch")
-            .map { ($0 as? Bool) ?? true }
-            ?? true
-        _tabsModel = StateObject(
-            wrappedValue: WorkspaceTabsModel(
-                restoreSavedTabs: benchmark == nil && restoresWorkspace,
-                initialRepositoryURL: benchmark?.opensRepository == true
-                    ? benchmark?.repositoryURL
-                    : nil,
-                restoredRepositoryURLs: benchmark?.mode == .tabs
-                    ? benchmark?.tabRepositoryURLs
-                    : nil,
-                persistenceEnabled: benchmark == nil,
-                automaticallyActivatesInitialTab: false,
-                monitoringActivationDelayMilliseconds: benchmark?.mode == .tabs
-                    ? 2_000
-                    : 100
-            )
+        // bool(forKey:) also reads "NO" passed as a launch argument.
+        let restoresWorkspace = defaults.object(forKey: "restoreWorkspaceOnLaunch") == nil
+            || defaults.bool(forKey: "restoreWorkspaceOnLaunch")
+        let tabsModel = WorkspaceTabsModel(
+            restoreSavedTabs: benchmark == nil && restoresWorkspace,
+            initialRepositoryURL: benchmark?.opensRepository == true
+                ? benchmark?.repositoryURL
+                : nil,
+            restoredRepositoryURLs: benchmark?.mode == .tabs
+                ? benchmark?.tabRepositoryURLs
+                : nil,
+            persistenceEnabled: benchmark == nil,
+            automaticallyActivatesInitialTab: false,
+            monitoringActivationDelayMilliseconds: benchmark?.mode == .tabs
+                ? 2_000
+                : 100
         )
+        if benchmark == nil {
+            tabsModel.removeUnusedSSHMirrors()
+        }
+        _tabsModel = StateObject(wrappedValue: tabsModel)
         _themePreferences = StateObject(
             wrappedValue: ThemePreferences(defaults: defaults)
         )
@@ -69,6 +71,7 @@ struct KvistApp: App {
                 .environmentObject(themePreferences)
                 .onAppear {
                     appDelegate.tabsModel = tabsModel
+                    AppUpdater.workspace = tabsModel
                 }
                 .preferredColorScheme(themePreferences.preferredColorScheme)
                 .tint(AppTheme.actionBlue)
@@ -113,6 +116,14 @@ struct KvistApp: App {
                 }
             }
 
+            CommandGroup(replacing: .help) {
+                Button("Kvist Help") {
+                    NSWorkspace.shared.open(
+                        URL(string: "https://github.com/hkarlsen06/Kvist#readme")!
+                    )
+                }
+            }
+
             // Menu validation reads the active repository model, so publish
             // the first frame before constructing the command hierarchy.
             if hasPresentedInitialFrame {
@@ -133,10 +144,13 @@ struct KvistApp: App {
                 }
                 .keyboardShortcut("t")
 
-                Button("Close Repository Tab") {
-                    tabsModel.close(tabsModel.activeTabID)
+                // ⌘W is handled by the key monitor in KvistAppDelegate: the
+                // system Close item owns that shortcut in the menu.
+                Button(
+                    tabsModel.isShowingOnlyEmptyTab ? "Close Window" : "Close Repository Tab"
+                ) {
+                    tabsModel.closeActiveTabOrWindow()
                 }
-                .keyboardShortcut("w")
 
                 Divider()
 
@@ -151,6 +165,16 @@ struct KvistApp: App {
                 }
                 .keyboardShortcut("[", modifiers: [.command, .shift])
                 .disabled(tabsModel.tabs.count < 2)
+            }
+
+            CommandGroup(after: .newItem) {
+                Divider()
+
+                Button("Save File") {
+                    Task { await tabsModel.activeModel.saveRepositoryFile() }
+                }
+                .keyboardShortcut("s")
+                .disabled(!tabsModel.activeModel.canSaveRepositoryFile)
             }
 
             CommandGroup(before: .toolbar) {
@@ -190,12 +214,6 @@ struct KvistApp: App {
             }
 
             CommandGroup(after: .toolbar) {
-                Button("Save File") {
-                    Task { await tabsModel.activeModel.saveRepositoryFile() }
-                }
-                .keyboardShortcut("s")
-                .disabled(!tabsModel.activeModel.canSaveRepositoryFile)
-
                 Button("Close Editor Panel") {
                     tabsModel.activeModel.closeEditorPanel()
                 }
@@ -313,15 +331,33 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
     // Option-Tab / Option-Shift-Tab cycle repository tabs. Menu items can
     // only carry one key equivalent (⌘⇧] / ⌘⇧[), so the alternates are
     // handled with an event monitor instead of duplicate menu entries.
+    // ⌘W closes the repository tab here too: the monitor runs before menu
+    // dispatch, and the system Close item keeps ⌘W in the menu itself.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Kvist draws its own repository tabs; macOS window tabs would add a
+        // second, unrelated tab bar and View menu items.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         KvistPerformanceInstrumentation.runGitMeasurementsIfRequested()
         tabCycleKeyMonitor = NSEvent.addLocalMonitorForEvents(
             matching: .keyDown
         ) { [weak self] event in
             guard let tabsModel = self?.tabsModel,
-                  event.keyCode == 48 else { return event }
+                  NSApp.modalWindow == nil,
+                  let window = event.window,
+                  window === WindowConfigurator.mainWindow,
+                  window.attachedSheet == nil else { return event }
             let flags = event.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
+            // Match the typed character, not the key position, so AZERTY's
+            // ⌘Z or Dvorak's ⌘, never closes a tab.
+            if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "w" {
+                tabsModel.closeActiveTabOrWindow()
+                return nil
+            }
+            guard event.keyCode == 48 else { return event }
             if flags == .option {
                 tabsModel.selectNext()
                 return nil
@@ -338,6 +374,7 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
         if KvistPerformanceInstrumentation.configuration == nil {
             AppUpdater.checkAutomaticallyIfDue()
         }
+        tabsModel?.retryMissingActiveTab()
         guard let model = tabsModel?.activeModel,
               model.sshRepository != nil else { return }
         Task { await model.refresh() }
@@ -346,21 +383,14 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        let defaults = UserDefaults.standard
-        let restoresWorkspace = defaults.object(forKey: "restoreWorkspaceOnLaunch")
-            .map { ($0 as? Bool) ?? true }
-            ?? true
-        if restoresWorkspace {
-            tabsModel?.prepareForTermination()
-            return .terminateNow
-        }
-        return tabsModel?.confirmDiscardAllRepositoryFileChanges() == false
-            ? .terminateCancel
-            : .terminateNow
+        // The updater already asked before replacing the app.
+        guard !AppUpdater.isRelaunching else { return .terminateNow }
+        return tabsModel?.prepareToQuit() == false ? .terminateCancel : .terminateNow
     }
 }
 
 private struct WindowConfigurator: NSViewRepresentable {
+    @MainActor static weak var mainWindow: NSWindow?
     let didDisplayInitialFrame: () -> Void
 
     init(didDisplayInitialFrame: @escaping () -> Void = {}) {
@@ -391,6 +421,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator {
         private let didDisplayInitialFrame: () -> Void
         private weak var configuredWindow: NSWindow?
@@ -402,6 +433,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         func configureIfNeeded(_ window: NSWindow?) {
             guard let window, configuredWindow !== window else { return }
             configuredWindow = window
+            WindowConfigurator.mainWindow = window
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.fullSizeContentView)

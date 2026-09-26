@@ -366,11 +366,21 @@ struct OpenVSXThemeResult: Decodable, Identifiable, Equatable {
     let name: String
     let namespace: String
     let version: String
-    let displayName: String
-    let description: String
+    // Open VSX omits these for some extensions. One such result must not
+    // fail the whole search.
+    private let rawDisplayName: String?
+    private let rawDescription: String?
     let downloadCount: Int?
     let deprecated: Bool?
 
+    private enum CodingKeys: String, CodingKey {
+        case url, files, name, namespace, version, downloadCount, deprecated
+        case rawDisplayName = "displayName"
+        case rawDescription = "description"
+    }
+
+    var displayName: String { rawDisplayName ?? name }
+    var description: String { rawDescription ?? "" }
     var id: String { "\(namespace).\(name)" }
     var pageURL: URL? {
         URL(string: "https://open-vsx.org/extension/\(namespace)/\(name)")
@@ -394,9 +404,9 @@ private struct OpenVSXExtensionDetail: Decodable {
     let files: Files
     let name: String
     let namespace: String
-    let displayName: String
     let categories: [String]
-    let license: String
+    /// Missing when the publisher declared no license; import refuses those.
+    let license: String?
     let downloadable: Bool?
     let bundledExtensions: [BundledExtension]?
 
@@ -716,10 +726,12 @@ final class ThemePreferences: ObservableObject {
               let downloadURL = metadata.files.download else {
             throw ThemeImportError.notDownloadable
         }
-        guard !metadata.license.trimmingCharacters(in: .whitespaces).isEmpty else {
+        guard let license = metadata.license,
+              !license.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw ThemeImportError.missingLicense
         }
         let (temporaryURL, response) = try await URLSession.shared.download(from: downloadURL)
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
         try Self.validate(response: response, data: nil)
         let size = (try? temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         guard size <= 50 * 1_024 * 1_024 else { throw ThemeImportError.archiveTooLarge }
@@ -729,7 +741,7 @@ final class ThemePreferences: ObservableObject {
                 at: temporaryURL,
                 publisher: metadata.namespace,
                 extensionName: metadata.name,
-                license: metadata.license,
+                license: license,
                 licenseURL: metadata.files.license,
                 sourceURL: metadata.pageURL,
                 iconPacksRoot: iconPacksRoot
@@ -923,8 +935,10 @@ enum EditorThemeImporter {
             guard let path = declaration["path"] as? String else { return nil }
             let themeURL = try safeURL(relativePath: path, under: extensionRoot)
             let (slug, name) = slugAndName(of: declaration, themeURL: themeURL)
-            let colors = try loadColors(at: themeURL, root: extensionRoot, depth: 0)
-            guard !colors.isEmpty else { return nil }
+            // Skip a malformed variant instead of failing the whole
+            // extension; the others may still import.
+            guard let colors = try? loadColors(at: themeURL, root: extensionRoot, depth: 0),
+                  !colors.isEmpty else { return nil }
             return ImportedAppTheme(
                 id: "openvsx.\(publisher).\(extensionName).\(slug)",
                 name: name,
@@ -1258,8 +1272,8 @@ enum ColorMath {
         return (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
-    /// Moves `color` toward white or black — whichever is opposite the
-    /// background — until it reaches the requested contrast ratio.
+    /// Moves `color` toward white or black, whichever is opposite the
+    /// background, until it reaches the requested contrast ratio.
     static func ensureContrast(
         _ color: UInt32,
         over background: UInt32,
@@ -1276,7 +1290,7 @@ enum ColorMath {
     }
 
     /// Keeps `candidate` when it is readable over `background`, otherwise
-    /// moves it toward plain white or black — whichever contrasts more —
+    /// moves it toward plain white or black, whichever contrasts more,
     /// until it reads, so the theme's hue survives when possible. The
     /// default ratio is WCAG AA for the small text these tokens label.
     static func readableText(
@@ -1566,6 +1580,42 @@ private struct PreferencesRow<Content: View>: View {
     }
 }
 
+/// A settings row with a title and optional caption on the left and a
+/// control on the right.
+private struct PreferencesControlRow<Control: View>: View {
+    let title: String
+    var caption: String?
+    var isWarning = false
+    @ViewBuilder var control: Control
+
+    init(
+        _ title: String,
+        caption: String? = nil,
+        isWarning: Bool = false,
+        @ViewBuilder control: () -> Control
+    ) {
+        self.title = title
+        self.caption = caption
+        self.isWarning = isWarning
+        self.control = control()
+    }
+
+    var body: some View {
+        PreferencesRow {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                    if let caption {
+                        PreferencesCaption(text: caption, isWarning: isWarning)
+                    }
+                }
+                Spacer(minLength: 12)
+                control
+            }
+        }
+    }
+}
+
 private struct PreferencesRowDivider: View {
     var body: some View {
         Divider()
@@ -1596,11 +1646,11 @@ private struct GeneralPreferencesPane: View {
     @AppStorage(AICommitMessagePreferences.providerKey)
     private var aiProviderRawValue = AICommitMessageProvider.codex.rawValue
     @AppStorage(AICommitMessagePreferences.codexModelKey)
-    private var codexModel = AICommitMessageProvider.codex.defaultModel
+    private var codexModel = ""
     @AppStorage(AICommitMessagePreferences.claudeModelKey)
-    private var claudeModel = AICommitMessageProvider.claude.defaultModel
+    private var claudeModel = ""
     @AppStorage(AICommitMessagePreferences.codexReasoningEffortKey)
-    private var codexReasoningEffortRawValue = AICommitMessageReasoningEffort.xhigh.rawValue
+    private var codexReasoningEffortRawValue = AICommitMessageReasoningEffort.low.rawValue
     @AppStorage(AICommitMessagePreferences.codexCommandTemplateKey)
     private var codexCommandTemplate = AICommitMessageProvider.codex.defaultCommandTemplate
     @AppStorage(AICommitMessagePreferences.claudeCommandTemplateKey)
@@ -1643,8 +1693,23 @@ private struct GeneralPreferencesPane: View {
         }
     }
 
+    /// The Codex model generation will use, resolving an empty setting to the
+    /// latest Luna model in the loaded catalog.
+    private var effectiveCodexModel: String? {
+        codexModel.isEmpty
+            ? AICommitMessageProvider.codex.automaticModel(in: availableModels)
+            : codexModel
+    }
+
+    private var automaticModelPlaceholder: String {
+        guard let model = provider.automaticModel(in: availableModels) else {
+            return provider.automaticModelName
+        }
+        return "\(provider.automaticModelName) (\(model))"
+    }
+
     private var availableCodexReasoningEfforts: [AICommitMessageReasoningEffort] {
-        guard let model = availableModels.first(where: { $0.id == codexModel }),
+        guard let model = availableModels.first(where: { $0.id == effectiveCodexModel }),
               !model.supportedReasoningEfforts.isEmpty else {
             return AICommitMessageReasoningEffort.allCases
         }
@@ -1654,124 +1719,120 @@ private struct GeneralPreferencesPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                PreferencesSection("Workspace") {
-                    PreferencesRow {
-                        HStack {
-                            Text("Restore repositories and workspace state when Kvist opens")
-                            Spacer()
-                            Toggle(
-                                "Restore repositories and workspace state when Kvist opens",
-                                isOn: $restoreWorkspaceOnLaunch
-                            )
+                PreferencesSection("Application") {
+                    PreferencesControlRow(
+                        "Restore workspace on launch",
+                        caption: "Reopens tabs, the selected tab, Files mode, expanded folders, commit text, and unsaved editor drafts."
+                    ) {
+                        Toggle("Restore workspace on launch", isOn: $restoreWorkspaceOnLaunch)
                             .labelsHidden()
                             .toggleStyle(.switch)
-                        }
                     }
                     PreferencesRowDivider()
-                    PreferencesRow {
-                        PreferencesCaption(text: "Open tabs, the selected tab, Files mode, expanded folders, commit text, and unsaved editor drafts are recovered.")
-                    }
-                }
-
-                PreferencesSection("Updates") {
-                    PreferencesRow {
-                        HStack {
-                            Text("Check for updates automatically")
-                            Spacer()
-                            Toggle(
-                                "Check for updates automatically",
-                                isOn: $checksForUpdates
-                            )
+                    PreferencesControlRow(
+                        "Check for updates automatically",
+                        caption: "Kvist asks GitHub for new releases once a day and asks before installing one."
+                    ) {
+                        Toggle("Check for updates automatically", isOn: $checksForUpdates)
                             .labelsHidden()
                             .toggleStyle(.switch)
-                        }
                     }
                     PreferencesRowDivider()
-                    PreferencesRow {
-                        PreferencesCaption(text: "Kvist asks GitHub for new releases once a day and asks before installing one. Use Kvist > Check for Updates to check now.")
-                    }
-                }
-
-                PreferencesSection("Terminal") {
-                    PreferencesRow {
-                        HStack {
-                            Text("Open repositories in")
-                            Spacer()
-                            Menu {
-                                ForEach(terminalApplications) { application in
-                                    Toggle(isOn: terminalSelection(for: application)) {
-                                        terminalLabel(for: application)
-                                    }
-                                }
-
-                                Divider()
-
-                                Button("Other…") {
-                                    chooseTerminalApplication()
-                                }
-                            } label: {
-                                if let selected = selectedTerminalApplication {
-                                    terminalLabel(for: selected)
-                                } else {
-                                    Text(terminalBundleIdentifier)
+                    PreferencesControlRow(
+                        "Terminal",
+                        caption: terminalError ?? "The toolbar's terminal button opens the working copy here. SSH sessions use your default app for .command files when this terminal cannot run shell scripts.",
+                        isWarning: terminalError != nil
+                    ) {
+                        Menu {
+                            ForEach(terminalApplications) { application in
+                                Toggle(isOn: terminalSelection(for: application)) {
+                                    terminalLabel(for: application)
                                 }
                             }
-                            .fixedSize()
-                            .accessibilityLabel("Terminal app")
+
+                            Divider()
+
+                            Button("Other…") {
+                                chooseTerminalApplication()
+                            }
+                        } label: {
+                            if let selected = selectedTerminalApplication {
+                                terminalLabel(for: selected)
+                            } else {
+                                Text(terminalBundleIdentifier)
+                            }
                         }
-                    }
-                    PreferencesRowDivider()
-                    PreferencesRow {
-                        PreferencesCaption(
-                            text: terminalError ?? "The terminal button in the repository toolbar opens the working copy here. SSH sessions need a terminal that runs shell scripts, so they fall back to your default app for .command files.",
-                            isWarning: terminalError != nil
-                        )
+                        .fixedSize()
+                        .accessibilityLabel("Terminal app")
                     }
                 }
 
                 PreferencesSection("Commits") {
-                    PreferencesRow {
-                        HStack {
-                            Text("When nothing is staged")
-                            Spacer()
-                            Picker("When nothing is staged", selection: $smartCommitPreference) {
-                                Text("Ask Each Time").tag(0)
-                                Text("Stage All Changes and Commit").tag(1)
-                                Text("Require Manual Staging").tag(2)
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                            .fixedSize()
+                    PreferencesControlRow("When nothing is staged") {
+                        Picker("When nothing is staged", selection: $smartCommitPreference) {
+                            Text("Ask Each Time").tag(0)
+                            Text("Stage All Changes and Commit").tag(1)
+                            Text("Require Manual Staging").tag(2)
                         }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
                     }
                 }
 
-                PreferencesSection("AI Commit Message") {
-                    PreferencesRow {
-                        HStack {
-                            Text("Agent")
-                            Spacer()
-                            Picker("Agent", selection: $aiProviderRawValue) {
-                                ForEach(AICommitMessageProvider.allCases) { provider in
-                                    Text(provider.displayName).tag(provider.rawValue)
-                                }
+                PreferencesSection("AI Commit Messages") {
+                    PreferencesControlRow("Agent") {
+                        Picker("Agent", selection: $aiProviderRawValue) {
+                            ForEach(AICommitMessageProvider.allCases) { provider in
+                                Text(provider.displayName).tag(provider.rawValue)
                             }
-                            .labelsHidden()
-                            .pickerStyle(.segmented)
-                            .fixedSize()
                         }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+                    PreferencesRowDivider()
+                    PreferencesControlRow(
+                        "Allow \(provider.displayName) to process staged changes",
+                        caption: "Kvist runs the installed \(provider.displayName) CLI with your account. It may send the staged diff, repository path, and your instructions to \(provider.serviceName). The prompt excludes unstaged and untracked changes."
+                    ) {
+                        Toggle(
+                            "Allow \(provider.displayName) to process staged changes",
+                            isOn: allowsProcessing
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
                     }
                     PreferencesRowDivider()
                     PreferencesRow {
-                        HStack {
-                            Text("Model")
-                            Spacer()
+                        DisclosureGroup(
+                            "Advanced",
+                            isExpanded: $showsAdvancedAISettings.animation()
+                        ) {
+                            EmptyView()
+                        }
+                    }
+
+                    if showsAdvancedAISettings {
+                        PreferencesRowDivider()
+                        PreferencesControlRow(
+                            "Model",
+                            caption: modelLoadError ?? "Leave empty to use the latest \(provider.automaticModelFamily). \(provider.modelSourceDescription)",
+                            isWarning: modelLoadError != nil
+                        ) {
                             HStack(spacing: 6) {
-                                TextField("Model ID", text: selectedModel)
+                                TextField(automaticModelPlaceholder, text: selectedModel)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 230)
 
                                 Menu {
+                                    Button(provider.automaticModelName) {
+                                        selectedModel.wrappedValue = ""
+                                        normalizeCodexReasoningEffort()
+                                    }
+
+                                    Divider()
+
                                     ForEach(availableModels) { model in
                                         Button {
                                             selectedModel.wrappedValue = model.id
@@ -1788,8 +1849,8 @@ private struct GeneralPreferencesPane: View {
                                     Image(systemName: "chevron.down")
                                 }
                                 .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
                                 .fixedSize()
-                                .disabled(availableModels.isEmpty)
                                 .help("Choose an available model")
 
                                 Button {
@@ -1807,14 +1868,16 @@ private struct GeneralPreferencesPane: View {
                                 .help("Refresh available models")
                             }
                         }
-                    }
 
-                    if provider == .codex {
-                        PreferencesRowDivider()
-                        PreferencesRow {
-                            HStack {
-                                Text("Reasoning effort")
-                                Spacer()
+                        if provider == .codex {
+                            PreferencesRowDivider()
+                            PreferencesControlRow(
+                                "Reasoning effort",
+                                caption: codexCommandTemplate.contains("{reasoning-effort}")
+                                    ? nil
+                                    : "The custom command does not use this setting.",
+                                isWarning: true
+                            ) {
                                 Picker(
                                     "Reasoning effort",
                                     selection: $codexReasoningEffortRawValue
@@ -1829,45 +1892,8 @@ private struct GeneralPreferencesPane: View {
                             }
                         }
 
-                        if !codexCommandTemplate.contains("{reasoning-effort}") {
-                            PreferencesRow {
-                                PreferencesCaption(
-                                    text: "The custom command does not use the selected reasoning effort.",
-                                    isWarning: true
-                                )
-                            }
-                        }
-                    }
-
-                    PreferencesRowDivider()
-                    PreferencesRow {
-                        PreferencesCaption(
-                            text: modelLoadError ?? provider.modelSourceDescription,
-                            isWarning: modelLoadError != nil
-                        )
-                    }
-                    PreferencesRowDivider()
-                    PreferencesRow {
-                        HStack {
-                            Text("Allow \(provider.displayName) to process staged changes")
-                            Spacer()
-                            Toggle(
-                                "Allow \(provider.displayName) to process staged changes",
-                                isOn: allowsProcessing
-                            )
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                        }
-                    }
-                    PreferencesRow {
-                        PreferencesCaption(text: "Kvist runs the installed \(provider.displayName) CLI using your account. It may send the staged diff, repository path, and your instructions to \(provider.serviceName). Unstaged and untracked changes are excluded by the prompt.")
-                    }
-                    PreferencesRowDivider()
-                    PreferencesRow {
-                        DisclosureGroup(
-                            "Advanced",
-                            isExpanded: $showsAdvancedAISettings
-                        ) {
+                        PreferencesRowDivider()
+                        PreferencesRow {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Command template")
                                     .font(.caption)
@@ -1894,7 +1920,6 @@ private struct GeneralPreferencesPane: View {
                                     .fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
                             }
-                            .padding(.top, 4)
                         }
                     }
                 }
@@ -1904,7 +1929,7 @@ private struct GeneralPreferencesPane: View {
         }
         .background(AppTheme.canvas)
         .task(id: aiProviderRawValue) {
-            migrateLegacyCodexCommandIfNeeded()
+            migrateLegacyCodexSettingsIfNeeded()
             await refreshModels()
         }
         .task {
@@ -1988,7 +2013,7 @@ private struct GeneralPreferencesPane: View {
     @MainActor
     private func normalizeCodexReasoningEffort() {
         guard provider == .codex,
-              let model = availableModels.first(where: { $0.id == codexModel }),
+              let model = availableModels.first(where: { $0.id == effectiveCodexModel }),
               !model.supportedReasoningEfforts.isEmpty else { return }
         let selected = AICommitMessageReasoningEffort(
             rawValue: codexReasoningEffortRawValue
@@ -2002,10 +2027,13 @@ private struct GeneralPreferencesPane: View {
     }
 
     @MainActor
-    private func migrateLegacyCodexCommandIfNeeded() {
-        guard codexCommandTemplate == AICommitMessageProvider.codex
-            .legacyDefaultCommandTemplate else { return }
-        codexCommandTemplate = AICommitMessageProvider.codex.defaultCommandTemplate
+    private func migrateLegacyCodexSettingsIfNeeded() {
+        if codexCommandTemplate == AICommitMessageProvider.codex.legacyDefaultCommandTemplate {
+            codexCommandTemplate = AICommitMessageProvider.codex.defaultCommandTemplate
+        }
+        if codexModel == AICommitMessageProvider.codex.legacyDefaultModel {
+            codexModel = ""
+        }
     }
 }
 
@@ -2317,7 +2345,7 @@ private struct ThemePreferencesPane: View {
 
     private var removalAlertTitle: String {
         if let name = selectedRemovableNames.first, removableSelectionCount == 1 {
-            return "Remove “\(name)”?"
+            return "Remove \"\(name)\"?"
         }
         return "Remove \(removableSelectionCount) Items?"
     }

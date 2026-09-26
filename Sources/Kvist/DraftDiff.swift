@@ -16,17 +16,34 @@ struct DraftDiff {
     ) -> DraftDiff {
         let savedLines = lines(in: savedText)
         let draftLines = lines(in: draftText)
-        let difference = draftLines.difference(from: savedLines)
-        let removedOffsets: Set<Int> = Set(difference.removals.compactMap {
-            change -> Int? in
-            guard case .remove(let offset, _, _) = change else { return nil }
-            return offset
-        })
-        let insertedOffsets: Set<Int> = Set(difference.insertions.compactMap {
-            change -> Int? in
-            guard case .insert(let offset, _, _) = change else { return nil }
-            return offset
-        })
+        // Diff only the changed middle: typical edits then cost linear time,
+        // and the quadratic diff never runs on thousands of lines on the
+        // main thread.
+        let prefixCount = zip(savedLines, draftLines).prefix { $0 == $1 }.count
+        var suffixCount = 0
+        while suffixCount < min(savedLines.count, draftLines.count) - prefixCount,
+              savedLines[savedLines.count - 1 - suffixCount]
+                == draftLines[draftLines.count - 1 - suffixCount] {
+            suffixCount += 1
+        }
+        let savedMiddle = savedLines[prefixCount..<(savedLines.count - suffixCount)]
+        let draftMiddle = draftLines[prefixCount..<(draftLines.count - suffixCount)]
+        let removedOffsets: Set<Int>
+        let insertedOffsets: Set<Int>
+        if savedMiddle.count + draftMiddle.count > 4_000 {
+            removedOffsets = Set(savedMiddle.indices)
+            insertedOffsets = Set(draftMiddle.indices)
+        } else {
+            let difference = Array(draftMiddle).difference(from: Array(savedMiddle))
+            removedOffsets = Set(difference.removals.compactMap { change -> Int? in
+                guard case .remove(let offset, _, _) = change else { return nil }
+                return offset + prefixCount
+            })
+            insertedOffsets = Set(difference.insertions.compactMap { change -> Int? in
+                guard case .insert(let offset, _, _) = change else { return nil }
+                return offset + prefixCount
+            })
+        }
         let entries = entries(
             savedLines: savedLines,
             draftLines: draftLines,

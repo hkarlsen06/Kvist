@@ -1074,3 +1074,37 @@ final class RepositoryFileEditorTests: XCTestCase {
         }
     }
 }
+
+final class RepositoryFileEncodingTests: XCTestCase {
+    func testSaveKeepsTheEncodingBOMAndLineEndingsOfTheFileOnDisk() throws {
+        let latin1 = Data([0x63, 0x61, 0x66, 0xE9, 0x0A])
+        XCTAssertEqual(
+            RepositoryFileLoader.encode("cafè\n", matching: latin1),
+            Data([0x63, 0x61, 0x66, 0xE8, 0x0A])
+        )
+        XCTAssertNil(RepositoryFileLoader.encode("🙂", matching: latin1))
+
+        let utf16 = Data([0xFF, 0xFE, 0x61, 0x00])
+        XCTAssertEqual(
+            RepositoryFileLoader.encode("b", matching: utf16),
+            Data([0xFF, 0xFE, 0x62, 0x00])
+        )
+
+        let bom = Data([0xEF, 0xBB, 0xBF, 0x61])
+        XCTAssertEqual(
+            RepositoryFileLoader.encode("é", matching: bom),
+            Data([0xEF, 0xBB, 0xBF, 0xC3, 0xA9])
+        )
+
+        let crlf = Data("a\r\nb\r\n".utf8)
+        XCTAssertEqual(
+            RepositoryFileLoader.encode("a\r\nnew\nb\r\n", matching: crlf),
+            Data("a\r\nnew\r\nb\r\n".utf8)
+        )
+        XCTAssertEqual(
+            RepositoryFileLoader.encode("a\nb\n", matching: Data("a\n".utf8)),
+            Data("a\nb\n".utf8)
+        )
+        XCTAssertEqual(RepositoryFileLoader.encode("new", matching: nil), Data("new".utf8))
+    }
+}

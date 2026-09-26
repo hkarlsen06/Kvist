@@ -46,6 +46,8 @@ final class GitClientTests: XCTestCase {
             [
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=10",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3",
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "ControlMaster=auto",
                 "-o", "ControlPersist=120",
@@ -57,6 +59,8 @@ final class GitClientTests: XCTestCase {
             [
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=10",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3",
                 "-o", "StrictHostKeyChecking=accept-new"
             ]
         )
@@ -588,6 +592,28 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(try client.snapshot().unstaged.isEmpty)
     }
 
+    func testDiscardTreatsBracketsInPathsLiterally() throws {
+        let client = GitClient(repositoryURL: repositoryURL)
+        let routeURL = repositoryURL.appendingPathComponent("app/[slug]/page.tsx")
+        let otherURL = repositoryURL.appendingPathComponent("app/s/page.tsx")
+        for url in [routeURL, otherURL] {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try "one\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+        try client.stageAll()
+        _ = try client.commit(message: "Add routes")
+        try "two\n".write(to: routeURL, atomically: true, encoding: .utf8)
+        try "two\n".write(to: otherURL, atomically: true, encoding: .utf8)
+
+        try client.discard("app/[slug]/page.tsx", isUntracked: false)
+
+        XCTAssertEqual(try String(contentsOf: routeURL, encoding: .utf8), "one\n")
+        XCTAssertEqual(try String(contentsOf: otherURL, encoding: .utf8), "two\n")
+    }
+
     func testDiscardAllChangesResetsIndexAndDeletesUntrackedFiles() throws {
         let client = GitClient(repositoryURL: repositoryURL)
         let trackedURL = repositoryURL.appendingPathComponent("tracked.txt")
@@ -723,6 +749,40 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(model.isBusy)
         XCTAssertTrue(model.unstaged.isEmpty)
         XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "original\n")
+    }
+
+    @MainActor
+    func testOpenDiffFollowsEditsMadeOutsideKvist() async throws {
+        let client = GitClient(repositoryURL: repositoryURL)
+        let fileURL = repositoryURL.appendingPathComponent("watched.txt")
+        try "original\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        try client.stageAll()
+        _ = try client.commit(message: "Add watched file")
+        try "first edit\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let model = RepositoryModel(
+            restoresLastRepository: false,
+            persistsLastRepository: false
+        )
+        await model.openRepository(repositoryURL)
+        let change = try XCTUnwrap(model.unstaged.first)
+        model.select(change)
+        var deadline = Date().addingTimeInterval(3)
+        while model.isDetailLoading, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(model.detailText.contains("+first edit"))
+        let documentID = model.detailDocumentID
+
+        try "second edit\n".write(to: fileURL, atomically: true, encoding: .utf8)
+        deadline = Date().addingTimeInterval(3)
+        while !model.detailText.contains("+second edit"), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(model.detailText.contains("+second edit"))
+        XCTAssertEqual(model.detailDocumentID, documentID)
+        XCTAssertFalse(model.isDetailLoading)
     }
 
     @MainActor
@@ -1639,6 +1699,19 @@ final class GitClientTests: XCTestCase {
             persistsLastRepository: false
         )
         await model.openRepository(repositoryURL)
+
+        // A new FSEvents stream first replays history, which delays its first
+        // live event by a few hundred milliseconds. Let a warm-up change
+        // through so the timing below measures coalescing alone.
+        try Data("warm-up\n".utf8).write(
+            to: repositoryURL.appendingPathComponent("warm-up.txt")
+        )
+        let warmUpDeadline = Date().addingTimeInterval(3)
+        while !(model.unstaged.contains(where: { $0.path == "warm-up.txt" })
+                && !model.hasOutstandingRepositoryTasks),
+              Date() < warmUpDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         RepositoryRefreshMetrics.reset()
 
         let directoryPath = "storm"
@@ -1993,6 +2066,10 @@ final class GitClientTests: XCTestCase {
           echo "--output-schema --output-last-message"
           exit 0
         fi
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          echo '{"models":[{"slug":"gpt-9-sol","display_name":"Sol","priority":1},{"slug":"gpt-9-luna","display_name":"Luna","priority":2},{"slug":"gpt-8-luna","display_name":"Old Luna","priority":3}]}'
+          exit 0
+        fi
         output=""
         model=""
         effort=""
@@ -2013,8 +2090,8 @@ final class GitClientTests: XCTestCase {
           esac
           shift
         done
-        [ "$model" = "gpt-5.6-sol" ] || exit 64
-        [ "$effort" = 'model_reasoning_effort=xhigh' ] || exit 65
+        [ "$model" = "gpt-9-luna" ] || exit 64
+        [ "$effort" = 'model_reasoning_effort=low' ] || exit 65
         input="$(cat)"
         printf '%s' "$input" | grep -q 'Run `git diff --cached --no-ext-diff --no-color`' || exit 66
         printf '%s' "$input" | grep -q 'Ignore every unstaged modification' || exit 67
@@ -2039,8 +2116,7 @@ final class GitClientTests: XCTestCase {
         let message = try AICommitMessageGenerator(
             configuration: AICommitMessageConfiguration(
                 provider: .codex,
-                model: AICommitMessageProvider.codex.defaultModel,
-                reasoningEffort: .xhigh,
+                reasoningEffort: .low,
                 commandTemplate: AICommitMessageProvider.codex.defaultCommandTemplate
             ),
             candidateURLs: [brokenURL, workingURL]
@@ -2142,7 +2218,7 @@ final class GitClientTests: XCTestCase {
         let message = try AICommitMessageGenerator(
             configuration: AICommitMessageConfiguration(
                 provider: .codex,
-                model: AICommitMessageProvider.codex.defaultModel,
+                model: "gpt-test",
                 reasoningEffort: .xhigh,
                 commandTemplate: AICommitMessageProvider.codex.defaultCommandTemplate
             ),
@@ -2191,7 +2267,7 @@ final class GitClientTests: XCTestCase {
             try AICommitMessageGenerator(
                 configuration: AICommitMessageConfiguration(
                     provider: .codex,
-                    model: AICommitMessageProvider.codex.defaultModel,
+                    model: "gpt-test",
                     reasoningEffort: .xhigh,
                     commandTemplate: AICommitMessageProvider.codex.defaultCommandTemplate
                 ),
@@ -2260,5 +2336,81 @@ final class GitClientTests: XCTestCase {
             )
         }
         return output
+    }
+}
+
+final class SSHScriptTransportTests: XCTestCase {
+    /// Runs `loginShell -c /bin/sh` the way sshd starts the command, with
+    /// Kvist's script on standard input.
+    private func runAsLoginShell(
+        _ loginShell: String,
+        greeting: String? = nil,
+        input: String
+    ) throws -> (status: Int32, output: Data) {
+        let process = Process()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: loginShell)
+        process.arguments = ["-c", (greeting.map { "echo \($0); " } ?? "") + "/bin/sh"]
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        try process.run()
+        try inputPipe.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+        try inputPipe.fileHandleForWriting.close()
+        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, output)
+    }
+
+    func testScriptRunsUnderCshAndDropsTheLoginGreeting() throws {
+        let script = """
+        value='it'"'"'s multi-line!'
+        printf '%s\\n' "$value"
+        """
+        let result = try runAsLoginShell(
+            "/bin/csh",
+            greeting: "Welcome",
+            input: SSHConnection.scriptInput(script)
+        )
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(
+            String(decoding: SSHConnection.outputAfterMarker(result.output), as: UTF8.self),
+            "it's multi-line!\n"
+        )
+    }
+
+    func testCommandsCannotReadTheScriptAndLeftoverInputNeverRuns() throws {
+        let noInput = try runAsLoginShell(
+            "/bin/sh",
+            input: SSHConnection.scriptInput("cat; echo end")
+        )
+        XCTAssertEqual(
+            String(decoding: SSHConnection.outputAfterMarker(noInput.output), as: UTF8.self),
+            "end\n"
+        )
+
+        let unread = try runAsLoginShell(
+            "/bin/sh",
+            input: SSHConnection.scriptInput("echo only", followedBy: "echo HACKED\n")
+        )
+        XCTAssertEqual(
+            String(decoding: SSHConnection.outputAfterMarker(unread.output), as: UTF8.self),
+            "only\n"
+        )
+
+        let consumed = try runAsLoginShell(
+            "/bin/sh",
+            input: SSHConnection.scriptInput("cat; echo done", followedBy: "prompt\n")
+        )
+        XCTAssertEqual(
+            String(decoding: SSHConnection.outputAfterMarker(consumed.output), as: UTF8.self),
+            "prompt\ndone\n"
+        )
+    }
+
+    func testExitStatusOfTheScriptReachesSSH() throws {
+        let result = try runAsLoginShell("/bin/sh", input: SSHConnection.scriptInput("exit 3"))
+        XCTAssertEqual(result.status, 3)
     }
 }

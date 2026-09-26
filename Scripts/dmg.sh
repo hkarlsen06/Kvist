@@ -19,7 +19,9 @@ fi
 STAGE="$(mktemp -d)"
 STAGE_ROOT="$STAGE/root"
 RW_DMG="$STAGE/Kvist-rw.dmg"
-trap 'rm -rf "$STAGE"' EXIT
+# Detach the volume too if a step fails while it is mounted; otherwise the
+# next run stops at the "already mounted" check above.
+trap '[[ -d "$MOUNT" ]] && hdiutil detach "$MOUNT" -force >/dev/null 2>&1; rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE_ROOT/.background"
 cp -R "$APP" "$STAGE_ROOT/Kvist.app"

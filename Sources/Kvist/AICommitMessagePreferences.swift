@@ -44,30 +44,40 @@ enum AICommitMessageProvider: String, CaseIterable, Identifiable, Sendable {
 
     var executableName: String { rawValue }
 
-    var defaultModel: String {
+    /// The model family used when none is chosen. A commit subject needs
+    /// little reasoning, so the default is each vendor's fast family.
+    var automaticModelFamily: String {
         switch self {
-        case .codex: "gpt-5.6-sol"
+        case .codex: "GPT Luna"
+        case .claude: "Sonnet"
+        }
+    }
+
+    var automaticModelName: String { "Latest \(automaticModelFamily)" }
+
+    /// Picks the automatic model. Codex lists models in its own priority
+    /// order, newest first within a family, so the first Luna is the latest.
+    /// Claude Code resolves the `sonnet` alias to the newest Sonnet itself.
+    func automaticModel(in models: [AICommitMessageModel]) -> String? {
+        switch self {
+        case .codex: (models.first { $0.id.hasSuffix("-luna") } ?? models.first)?.id
         case .claude: "sonnet"
+        }
+    }
+
+    /// The model Kvist stored as the default before it resolved the latest
+    /// Luna model. Loading treats it as automatic.
+    var legacyDefaultModel: String? {
+        switch self {
+        case .codex: "gpt-6-luna"
+        case .claude: nil
         }
     }
 
     var suggestedModels: [AICommitMessageModel] {
         switch self {
         case .codex:
-            [
-                AICommitMessageModel(
-                    id: "gpt-5.6-sol",
-                    name: "GPT-5.6-Sol",
-                    supportedReasoningEfforts: AICommitMessageReasoningEffort.allCases,
-                    defaultReasoningEffort: .low
-                ),
-                AICommitMessageModel(
-                    id: "gpt-5.6-terra",
-                    name: "GPT-5.6-Terra",
-                    supportedReasoningEfforts: AICommitMessageReasoningEffort.allCases,
-                    defaultReasoningEffort: .medium
-                )
-            ]
+            []
         case .claude:
             [
                 AICommitMessageModel(id: "sonnet", name: "Sonnet (latest)"),
@@ -98,9 +108,9 @@ enum AICommitMessageProvider: String, CaseIterable, Identifiable, Sendable {
     var modelSourceDescription: String {
         switch self {
         case .codex:
-            "Models reported by the installed Codex CLI"
+            "The menu lists models from the installed Codex CLI."
         case .claude:
-            "Aliases supported by Claude Code; exact model IDs are also accepted"
+            "The menu lists Claude Code aliases. Full model IDs also work."
         }
     }
 }
@@ -126,13 +136,14 @@ struct AICommitMessageModel: Identifiable, Hashable, Sendable {
 
 struct AICommitMessageConfiguration: Equatable, Sendable {
     let provider: AICommitMessageProvider
-    let model: String
+    /// `nil` selects the provider's automatic model when generating.
+    let model: String?
     let reasoningEffort: AICommitMessageReasoningEffort?
     let commandTemplate: String
 
     init(
         provider: AICommitMessageProvider,
-        model: String,
+        model: String? = nil,
         reasoningEffort: AICommitMessageReasoningEffort? = nil,
         commandTemplate: String
     ) {
@@ -156,7 +167,7 @@ struct AICommitMessageConfiguration: Equatable, Sendable {
                 rawValue: defaults.string(
                     forKey: AICommitMessagePreferences.codexReasoningEffortKey
                 ) ?? ""
-            ) ?? .xhigh
+            ) ?? .low
             : nil
         let storedCommand = command.flatMap { $0.isEmpty ? nil : $0 }
         let normalizedCommand = storedCommand == provider.legacyDefaultCommandTemplate
@@ -165,7 +176,9 @@ struct AICommitMessageConfiguration: Equatable, Sendable {
 
         return Self(
             provider: provider,
-            model: model.flatMap { $0.isEmpty ? nil : $0 } ?? provider.defaultModel,
+            model: model.flatMap {
+                $0.isEmpty || $0 == provider.legacyDefaultModel ? nil : $0
+            },
             reasoningEffort: reasoningEffort,
             commandTemplate: normalizedCommand
                 ?? provider.defaultCommandTemplate

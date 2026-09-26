@@ -8,11 +8,11 @@ product
 
 Developers who want a focused source-control workflow without keeping a full editor open, and who need to browse and edit files on remote machines over SSH without setting up Git there first.
 
-## Product Purpose
+## Product purpose
 
 Provide a compact native macOS panel for reviewing changes, staging files, committing, syncing, and scanning Git history, and a lightweight file browser and editor for local folders and SSH hosts that works with or without a Git repository. Success means the app can stay open beside other work without taking meaningful screen space or attention.
 
-## Brand Personality
+## Brand personality
 
 Familiar, dense, quiet.
 
@@ -20,7 +20,7 @@ Familiar, dense, quiet.
 
 Not a dashboard, IDE, multi-pane desktop suite, or decorative Git visualization. Avoid cards, oversized controls, wide inspector panes, and generic macOS document-window chrome.
 
-## Design Principles
+## Design principles
 
 - Keep source-control interactions dense, familiar, and predictable.
 - Spend width only on filenames, paths, and commit subjects.
@@ -28,6 +28,6 @@ Not a dashboard, IDE, multi-pane desktop suite, or decorative Git visualization.
 - Prefer direct actions and familiar Git terminology.
 - Feel like a utility panel, not a destination application.
 
-## Accessibility & Inclusion
+## Accessibility and inclusion
 
 Maintain keyboard access, visible focus, semantic labels, status colors supported by text, and reduced-motion compatibility.

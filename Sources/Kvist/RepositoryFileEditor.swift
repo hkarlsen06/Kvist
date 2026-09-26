@@ -103,6 +103,9 @@ struct SourceDocument: NSViewRepresentable {
             context.coordinator.isApplyingExternalText = true
             textView.string = text
             replacedText = true
+            // Undo entries belong to the text that was just replaced, such as
+            // the previous file. Replaying them would edit this one.
+            context.coordinator.undoManager.removeAllActions()
             textView.selectedRanges = Self.clampedSelectionRanges(
                 selection,
                 textLength: (text as NSString).length
@@ -157,11 +160,18 @@ struct SourceDocument: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding private var text: String
         var isApplyingExternalText = false
+        /// Keeps editor undo separate from the window's, so ⌘Z in the commit
+        /// field never reaches into the editor and the reverse.
+        let undoManager = UndoManager()
         private var lastScrollRequestID: UUID?
         private var highlightedRange: NSRange?
 
         init(text: Binding<String>) {
             _text = text
+        }
+
+        func undoManager(for view: NSTextView) -> UndoManager? {
+            undoManager
         }
 
         func textDidChange(_ notification: Notification) {
@@ -247,7 +257,7 @@ struct SourceDocument: NSViewRepresentable {
         let targetCharacter = min(characterIndex, content.length - 1)
         // Non-contiguous layout only estimates the height of text it has not
         // reached yet, so the position of a line deep in the file can be off by
-        // dozens of lines. Lay out everything above the target — the layout is
+        // dozens of lines. Lay out everything above the target. The layout is
         // cached, so later jumps into the same document stay cheap.
         layoutManager.ensureLayout(
             forCharacterRange: NSRange(location: 0, length: targetCharacter + 1)
@@ -739,7 +749,8 @@ private final class SourceTextView: NSTextView {
             .option,
             .shift
         ])
-        if event.keyCode == 53, shortcutModifiers.isEmpty {
+        // During input-method composition, Escape cancels the composition.
+        if event.keyCode == 53, shortcutModifiers.isEmpty, !hasMarkedText() {
             onExit?()
             return
         }

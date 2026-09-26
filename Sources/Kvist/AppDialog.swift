@@ -24,11 +24,13 @@ struct AppDialogField {
     let label: String
     let placeholder: String
     let isRequired: Bool
+    let value: String
 
-    init(label: String, placeholder: String, isRequired: Bool = true) {
+    init(label: String, placeholder: String, isRequired: Bool = true, value: String = "") {
         self.label = label
         self.placeholder = placeholder
         self.isRequired = isRequired
+        self.value = value
     }
 }
 
@@ -74,6 +76,7 @@ enum AppDialog {
         let textFields = fields.map { field in
             let textField = NSTextField()
             textField.placeholderString = field.placeholder
+            textField.stringValue = field.value
             textField.setAccessibilityLabel(field.label)
             return textField
         }
@@ -99,17 +102,40 @@ enum AppDialog {
         let orderedActions = actions.enumerated().sorted {
             actionPriority($0.element.role) < actionPriority($1.element.role)
         }
+        var primaryButton: NSButton?
         for (_, action) in orderedActions {
             let button = alert.addButton(withTitle: action.title)
             switch action.role {
             case .primary:
                 button.keyEquivalent = "\r"
+                primaryButton = button
             case .cancel:
                 button.keyEquivalent = "\u{1b}"
             case .secondary, .destructive:
                 button.keyEquivalent = ""
             }
         }
+
+        // Keep the primary action disabled until every required field has
+        // text, so the dialog never closes without doing anything.
+        let updatePrimaryButton = {
+            primaryButton?.isEnabled = !zip(fields, textFields).contains { field, textField in
+                field.isRequired
+                    && textField.stringValue
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+        updatePrimaryButton()
+        let observers = textFields.map { textField in
+            NotificationCenter.default.addObserver(
+                forName: NSControl.textDidChangeNotification,
+                object: textField,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { updatePrimaryButton() }
+            }
+        }
+        defer { observers.forEach(NotificationCenter.default.removeObserver) }
 
         alert.window.initialFirstResponder = textFields.first
         let response = alert.runModal()
@@ -157,7 +183,7 @@ enum AppDialog {
             case .cancel:
                 button.keyEquivalent = "\u{1b}"
             case .secondary, .destructive:
-                break
+                button.keyEquivalent = ""
             }
         }
 

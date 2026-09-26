@@ -17,6 +17,8 @@ enum AppUpdater {
         string: "https://api.github.com/repos/hkarlsen06/Kvist/releases?per_page=20"
     )!
     private static var isChecking = false
+    static weak var workspace: WorkspaceTabsModel?
+    private(set) static var isRelaunching = false
 
     struct Release: Decodable {
         struct Asset: Decodable {
@@ -47,6 +49,8 @@ enum AppUpdater {
         case extractionFailed
         case invalidSignature
         case unexpectedVersion
+        case rateLimited
+        case operationInProgress
 
         var errorDescription: String? {
             switch self {
@@ -62,6 +66,10 @@ enum AppUpdater {
                 "The downloaded app is not signed by the Kvist developer. Local development builds cannot update themselves."
             case .unexpectedVersion:
                 "The downloaded app has a different version than the release."
+            case .rateLimited:
+                "GitHub is limiting requests from this network. Try again later."
+            case .operationInProgress:
+                "A Git operation is still running. Try again when it finishes."
             }
         }
     }
@@ -82,13 +90,18 @@ enum AppUpdater {
 
     /// Drops the download instructions and checksums that end every release
     /// body, along with Markdown headings, which read as noise in an alert.
+    /// Long notes are cut so the alert's buttons stay on screen.
     nonisolated static func releaseNotesSummary(_ body: String) -> String {
-        body.components(separatedBy: .newlines)
+        let lines = body.components(separatedBy: .newlines)
             .prefix { !$0.hasPrefix("Requires macOS") && !$0.hasPrefix("## Requirements") }
             .filter { !$0.hasPrefix("#") }
             .joined(separator: "\n")
             .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: "\n")
+        let limit = 20
+        guard lines.count > limit else { return lines.joined(separator: "\n") }
+        return (lines.prefix(limit) + ["…"]).joined(separator: "\n")
     }
 
     static func checkAutomaticallyIfDue() {
@@ -100,22 +113,34 @@ enum AppUpdater {
     }
 
     static func check(userInitiated: Bool) async {
-        guard !isChecking else { return }
+        guard !isChecking else {
+            if userInitiated {
+                AppDialog.message(
+                    title: "Checking for Updates",
+                    message: "Kvist is already checking for updates."
+                )
+            }
+            return
+        }
         isChecking = true
         defer { isChecking = false }
+        // Record the attempt up front so an offline Mac does not send a new
+        // request every time Kvist becomes active.
+        UserDefaults.standard.set(Date(), forKey: lastCheckKey)
 
         let release: Release?
         do {
             var request = URLRequest(url: releasesURL)
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                throw UpdateError.badResponse
+            switch (response as? HTTPURLResponse)?.statusCode {
+            case 200: break
+            case 403, 429: throw UpdateError.rateLimited
+            default: throw UpdateError.badResponse
             }
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             release = newestRelease(in: try decoder.decode([Release].self, from: data))
-            UserDefaults.standard.set(Date(), forKey: lastCheckKey)
         } catch {
             if userInitiated {
                 AppDialog.message(
@@ -196,6 +221,13 @@ enum AppUpdater {
             try prepare(archiveURL, digest: asset.digest, version: version, in: workURL)
         }.value
 
+        if workspace?.hasRunningOperations == true {
+            throw UpdateError.operationInProgress
+        }
+        // Ask about unsaved files before touching the installed app, so a
+        // cancelled quit leaves the old version in place.
+        guard workspace?.prepareToQuit() ?? true else { return }
+
         _ = try FileManager.default.replaceItemAt(bundleURL, withItemAt: newAppURL)
 
         // Reopen the app once this process has exited.
@@ -209,6 +241,10 @@ enum AppUpdater {
             bundleURL.path
         ]
         try relauncher.run()
+        // terminate exits without running the deferred cleanup.
+        try? FileManager.default.removeItem(at: archiveURL)
+        try? FileManager.default.removeItem(at: workURL)
+        isRelaunching = true
         NSApp.terminate(nil)
     }
 

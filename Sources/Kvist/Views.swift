@@ -35,7 +35,6 @@ enum AppTheme {
     static var secondary: Color { Color(hex: palette.secondary) }
     static var muted: Color { Color(hex: palette.muted) }
     static var onAccent: Color { Color(hex: palette.onAccent) }
-    static var onDestructive: Color { Color(hex: palette.onDestructive) }
     static var onPill: Color { Color(hex: palette.onPill) }
     static var badgeText: Color { Color(hex: palette.badgeText) }
 
@@ -52,17 +51,7 @@ enum AppTheme {
     static var added: Color { Color(hex: palette.added) }
     static var deleted: Color { Color(hex: palette.deleted) }
     static var conflict: Color { Color(hex: palette.conflict) }
-    static var destructiveButton: Color { Color(hex: palette.readableDestructiveButton) }
     static var swift: Color { Color(hex: palette.swift) }
-
-    // Diff rendering
-    static var diffHeaderText: Color { Color(hex: palette.diffHeaderText) }
-    static var diffHunkText: Color { Color(hex: palette.diffHunkText) }
-    static var diffHunkBackground: Color { Color(hex: palette.diffHunkBackground) }
-    static var diffAddedText: Color { Color(hex: palette.diffAddedText) }
-    static var diffAddedBackground: Color { Color(hex: palette.diffAddedBackground) }
-    static var diffRemovedText: Color { Color(hex: palette.diffRemovedText) }
-    static var diffRemovedBackground: Color { Color(hex: palette.diffRemovedBackground) }
 
     /// Graph lanes cycle through fixed hues; adjust them so they stay
     /// visible against whichever canvas the active theme brings.
@@ -75,7 +64,6 @@ enum AppTheme {
     static var primaryNSColor: NSColor { NSColor(hex: palette.primary) }
     static var secondaryNSColor: NSColor { NSColor(hex: palette.secondary) }
     static var mutedNSColor: NSColor { NSColor(hex: palette.muted) }
-    static var edgeNSColor: NSColor { NSColor(hex: palette.edge) }
     static var graphBlueNSColor: NSColor { NSColor(hex: palette.graphBlue) }
     static var addedNSColor: NSColor { NSColor(hex: palette.added) }
     static var conflictNSColor: NSColor { NSColor(hex: palette.conflict) }
@@ -94,14 +82,11 @@ enum AppType {
     /// Supporting labels beside row content: paths and branch names.
     static let rowDetail = Font.system(size: 13)
     /// Nested rows inside graph expansions.
-    static let nestedRow = Font.system(size: 13)
-    static let nestedRowDetail = Font.system(size: 12)
     /// Counts, pagination, hints, and the status strip.
     static let caption = Font.system(size: 12)
     static let captionEmphasis = Font.system(size: 12, weight: .medium)
     /// Single-letter Git status codes.
     static let statusLetter = Font.system(size: 13, weight: .semibold, design: .monospaced)
-    static let nestedStatusLetter = Font.system(size: 12, weight: .semibold, design: .monospaced)
 }
 
 /// Shared file-type iconography so working-tree rows and history rows always
@@ -504,14 +489,14 @@ private struct RepositoryStatusBar: View {
                     Button("Skip") {
                         Task { await model.skipActiveOperation() }
                     }
-                    .help("Skip the current commit")
+                    .help("Skip Current Commit")
                 }
 
-                Button("Abort", role: .destructive) {
+                Button("Abort…", role: .destructive) {
                     Task { await model.abortActiveOperation() }
                 }
                 .foregroundStyle(AppTheme.deleted)
-                .help("Abort " + operation.displayName.lowercased())
+                .help("Abort \(operation.displayName)")
             }
             .buttonStyle(.plain)
             .font(.system(size: 11, weight: .medium))
@@ -630,10 +615,16 @@ private struct ActiveRepositoryView: View {
             VStack(spacing: 0) {
                 ZStack(alignment: .leading) {
                     HStack(spacing: 0) {
-                        RepositoryContentView(
-                            isRepositoryLoadPending: tab.isRepositoryLoadPending,
-                            pendingRepositoryName: tab.displayName
-                        )
+                        Group {
+                            if tab.isFolderMissing, model.repositoryURL == nil {
+                                MissingFolderView(tab: tab)
+                            } else {
+                                RepositoryContentView(
+                                    isRepositoryLoadPending: tab.isRepositoryLoadPending,
+                                    pendingRepositoryName: tab.displayName
+                                )
+                            }
+                        }
                         .frame(width: repositoryWidth)
                         .frame(maxHeight: .infinity)
                         .background(AppTheme.canvas)
@@ -793,15 +784,19 @@ private struct RepositorySplitResizeHandle: View {
                             widthAtDragStart + value.translation.width
                         )
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
                         widthAtDragStart = nil
+                        // The zero-distance drag claims every click, so a
+                        // separate tap gesture would never see the double-click.
+                        if NSApp.currentEvent?.clickCount == 2,
+                           abs(value.translation.width) < 2 {
+                            setRepositoryWidth(
+                                availablePaneWidth
+                                    * CGFloat(RepositorySplitLayout.defaultFraction)
+                            )
+                        }
                     }
             )
-            .onTapGesture(count: 2) {
-                setRepositoryWidth(
-                    availablePaneWidth * CGFloat(RepositorySplitLayout.defaultFraction)
-                )
-            }
             .accessibilityLabel("Resize repository and side panels")
             .accessibilityValue(
                 "\(Int((currentRepositoryWidth / max(1, availablePaneWidth) * 100).rounded()))% repository"
@@ -1174,7 +1169,7 @@ private struct RepositoryEditorPanel: View {
                     showsLatestOnly: preview.isImage && model.gitFileDetailMode == .preview
                 )
             } else if model.detailKind == .diff {
-                DiffDocument(text: model.detailText)
+                DiffDocument(text: model.detailText, documentID: model.detailDocumentID)
                     .equatable()
             } else if model.detailKind == .preview,
                       let url = model.selectedRepositoryFileURL {
@@ -1293,6 +1288,7 @@ private struct RepositoryEditorPanel: View {
 }
 
 private struct ConflictResolverView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: RepositoryModel
     let session: ConflictResolutionSession
     @State private var navigationCursor: Int?
@@ -1358,7 +1354,7 @@ private struct ConflictResolverView: View {
                 HStack(spacing: 2) {
                     conflictStepButton(
                         symbol: "chevron.up",
-                        help: "Previous unresolved conflict",
+                        help: "Previous Unresolved Conflict",
                         document: document,
                         proxy: proxy,
                         forward: false
@@ -1366,7 +1362,7 @@ private struct ConflictResolverView: View {
 
                     conflictStepButton(
                         symbol: "chevron.down",
-                        help: "Next unresolved conflict",
+                        help: "Next Unresolved Conflict",
                         document: document,
                         proxy: proxy,
                         forward: true
@@ -1472,7 +1468,7 @@ private struct ConflictResolverView: View {
                 ?? unresolved[unresolved.count - 1]
         }
         navigationCursor = target
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
             proxy.scrollTo(target, anchor: .top)
         }
     }
@@ -1946,7 +1942,7 @@ private struct ConflictHunkView: View {
             .background(AppTheme.selection)
 
             if text.isEmpty {
-                Text("No content — the conflicted block will be removed")
+                Text("No content. The conflicted block will be removed.")
                     .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(AppTheme.muted)
                     .padding(9)
@@ -2042,7 +2038,7 @@ private struct ConflictVersionPane: View {
             ScrollView([.horizontal, .vertical]) {
                 Group {
                     if text.isEmpty {
-                        Text("No content — this side deletes these lines")
+                        Text("No content. This side deletes these lines.")
                             .font(.system(size: 11.5, design: .monospaced))
                             .foregroundStyle(AppTheme.muted)
                     } else {
@@ -2287,13 +2283,20 @@ private struct RepositoryLocationMenu: View {
     var body: some View {
         Menu {
             Button("Copy Directory as Path") {
+                if let sshRepository = model.sshRepository {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(sshRepository.location(), forType: .string)
+                    return
+                }
                 guard let repositoryURL = model.repositoryURL else { return }
                 RepositoryLocationActions.copyDirectoryPath(repositoryURL)
             }
 
-            Button("Reveal in Finder") {
-                guard let repositoryURL = model.repositoryURL else { return }
-                RepositoryLocationActions.revealInFinder(repositoryURL)
+            if model.sshRepository == nil {
+                Button("Reveal in Finder") {
+                    guard let repositoryURL = model.repositoryURL else { return }
+                    RepositoryLocationActions.revealInFinder(repositoryURL)
+                }
             }
         } label: {
             if let image = RepositoryLocationSymbol.image {
@@ -2399,6 +2402,56 @@ private struct RepositoryContentView: View {
                 }
             }
         }
+    }
+}
+
+private struct MissingFolderView: View {
+    @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    @ObservedObject var tab: RepositoryTab
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "externaldrive.badge.questionmark")
+                .font(.system(size: 34, weight: .regular))
+                .foregroundStyle(AppTheme.muted)
+                .accessibilityHidden(true)
+
+            VStack(spacing: 6) {
+                Text("\(tab.displayName) is not available")
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text(message)
+                    .font(AppType.rowDetail)
+                    .foregroundStyle(AppTheme.muted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 30)
+
+            Button("Try Again") {
+                tabsModel.retryMissingActiveTab()
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .frame(width: 210, height: 34)
+
+            Button("Close Tab") {
+                tabsModel.close(tab.id)
+            }
+            .buttonStyle(.plain)
+            .font(AppType.rowDetail)
+            .foregroundStyle(AppTheme.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var message: String {
+        let path = (tab.repositoryURL?.path ?? "") as NSString
+        var text = "Kvist can't find \(path.abbreviatingWithTildeInPath). "
+            + "It may be on a drive that isn't connected, or it was moved or deleted."
+        if tab.hasRecoveredDraft {
+            text += " Unsaved edits from the last session are kept until the folder is back."
+        }
+        return text
     }
 }
 
@@ -2580,7 +2633,7 @@ private struct WelcomeView: View {
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            guard let provider = providers.first else { return false }
+            guard !model.isBusy, let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 Task { @MainActor in
@@ -2654,14 +2707,20 @@ private struct RecentRepositoryRow: View {
     @EnvironmentObject private var model: RepositoryModel
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
     let url: URL
+    private let sshRepository: SSHRepository?
     @State private var hovering = false
+
+    init(url: URL) {
+        self.url = url
+        sshRepository = SSHRepository.mirrored(at: url)
+    }
 
     var body: some View {
         Button {
             Task { await model.openRepository(url) }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "folder")
+                Image(systemName: sshRepository == nil ? "folder" : "network")
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.secondary)
                     .frame(width: 16)
@@ -2690,15 +2749,17 @@ private struct RecentRepositoryRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(url.path)
+        .help(sshRepository?.location() ?? url.path)
         .disabled(
             model.isBusy
                 || model.isGeneratingCommitMessage
                 || model.hasPendingChangeOperations
         )
         .contextMenu {
-            Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+            if sshRepository == nil {
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
             }
 
             Button("Remove from Recents") {
@@ -2708,7 +2769,11 @@ private struct RecentRepositoryRow: View {
     }
 
     private var abbreviatedParentPath: String {
-        (url.deletingLastPathComponent().path as NSString)
+        if let sshRepository {
+            return "\(sshRepository.host):"
+                + (sshRepository.path as NSString).deletingLastPathComponent
+        }
+        return (url.deletingLastPathComponent().path as NSString)
             .abbreviatingWithTildeInPath
     }
 }
@@ -2750,9 +2815,6 @@ private struct WorkspaceView: View {
 
                 GraphPanel(isOpeningRepository: isOpeningRepository)
                     .frame(height: resolvedGraphHeight)
-            }
-            .onChange(of: geometry.size.height) {
-                graphPanelHeight = Double(resolvedGraphHeight)
             }
         }
         .clipped()
@@ -2970,7 +3032,7 @@ final class TabDragState: ObservableObject {
 }
 
 /// Transparent view behind the tab row's content that restores the standard
-/// titlebar behaviors — window dragging and double-click zoom/minimize — for
+/// titlebar behaviors, window dragging and double-click zoom or minimize, for
 /// the empty areas of the bar, since it now occupies the titlebar region.
 ///
 /// It also implements drag-to-reorder for the tabs. That cannot live in the
@@ -2983,8 +3045,8 @@ final class TabDragState: ObservableObject {
 /// claims the rest of the sequence and drives `TabDragState`. This view
 /// spans the whole bar, so converting event locations into its (flipped)
 /// bounds yields the same coordinates as the tab frames reported in the
-/// bar's named coordinate space — one coordinate system, pure AppKit
-/// conversion.
+/// bar's named coordinate space. Both use one coordinate system, converted
+/// by AppKit alone.
 private struct WindowDragArea: NSViewRepresentable {
     var orderedTabIDs: [UUID]
     var tabFrames: [UUID: CGRect]
@@ -3171,6 +3233,7 @@ private struct RepositoryTabItem: View {
     let tabName: String
     let isActive: Bool
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(tab: RepositoryTab, isActive: Bool, dragState: TabDragState) {
         _tab = ObservedObject(wrappedValue: tab)
@@ -3237,7 +3300,7 @@ private struct RepositoryTabItem: View {
             .allowsHitTesting(hovering || isActive)
             .accessibilityHidden(!(hovering || isActive))
             .accessibilityLabel("Close \(tabName) Tab")
-            .help("Close Tab (⌘W)")
+            .help(isActive ? "Close Tab (⌘W)" : "Close Tab")
             .padding(.trailing, 2)
         }
         .foregroundStyle(isActive ? AppTheme.primary : AppTheme.secondary)
@@ -3290,7 +3353,7 @@ private struct RepositoryTabItem: View {
         // unanimated pass so the committed order lands exactly where the
         // tabs are already drawn.
         .animation(
-            dragState.isDragging && !isDragged
+            dragState.isDragging && !isDragged && !reduceMotion
                 ? .easeInOut(duration: 0.13)
                 : nil,
             value: dragOffsetX
@@ -3310,7 +3373,11 @@ private struct RepositoryTabItem: View {
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help(tab.repositoryURL?.path ?? "Open a repository")
+        .help(
+            tab.loadedModel?.sshRepository?.location()
+                ?? tab.repositoryURL?.path
+                ?? "Open a repository"
+        )
         .contextMenu {
             Button("Close Tab") {
                 tabsModel.close(tabID)
@@ -3322,15 +3389,21 @@ private struct RepositoryTabItem: View {
             .disabled(tabsModel.tabs.count < 2)
 
             if let url = tab.repositoryURL {
+                let sshRepository = SSHRepository.mirrored(at: url)
                 Divider()
 
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                if sshRepository == nil {
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
                 }
 
                 Button("Copy Path") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(url.path, forType: .string)
+                    NSPasteboard.general.setString(
+                        sshRepository?.location() ?? url.path,
+                        forType: .string
+                    )
                 }
             }
         }
@@ -3350,7 +3423,11 @@ private struct GraphResizeHandle: View {
             .frame(height: 5)
             .overlay {
                 Rectangle()
-                    .fill(isHovered ? AppTheme.actionBlue : AppTheme.edge)
+                    .fill(
+                        isHovered || heightAtDragStart != nil
+                            ? AppTheme.actionBlue
+                            : AppTheme.edge
+                    )
                     .frame(height: 1)
             }
             .contentShape(Rectangle())
@@ -3361,6 +3438,13 @@ private struct GraphResizeHandle: View {
                 } else {
                     NSCursor.pop()
                 }
+            }
+            .onDisappear {
+                if isHovered {
+                    NSCursor.pop()
+                    isHovered = false
+                }
+                heightAtDragStart = nil
             }
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -3373,14 +3457,17 @@ private struct GraphResizeHandle: View {
                             heightAtDragStart - value.translation.height
                         ))
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
                         heightAtDragStart = nil
+                        if NSApp.currentEvent?.clickCount == 2,
+                           abs(value.translation.height) < 2 {
+                            height = Double(clamp(260))
+                        }
                     }
             )
-            .onTapGesture(count: 2) {
-                height = Double(clamp(260))
-            }
             .accessibilityLabel("Resize graph")
+            .accessibilityValue("\(Int(currentHeight)) points")
+            .help("Drag to resize the graph. Double-click to reset.")
             .accessibilityAdjustableAction { direction in
                 switch direction {
                 case .increment:
@@ -3401,8 +3488,6 @@ private struct GraphResizeHandle: View {
 private struct ChangesPanel: View {
     @EnvironmentObject private var model: RepositoryModel
     let isOpeningRepository: Bool
-    @State private var stagedExpanded = true
-    @State private var unstagedExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -3432,7 +3517,7 @@ private struct ChangesPanel: View {
                             FileSection(
                                 title: "Staged Changes",
                                 changes: model.staged,
-                                expanded: $stagedExpanded,
+                                expanded: $model.isStagedSectionExpanded,
                                 action: { Task { await model.unstageAll() } }
                             )
                         }
@@ -3440,12 +3525,12 @@ private struct ChangesPanel: View {
                         FileSection(
                             title: "Changes",
                             changes: model.unstaged,
-                            expanded: $unstagedExpanded,
+                            expanded: $model.isUnstagedSectionExpanded,
                             action: { Task { await model.stageAll() } }
                         )
 
                         if model.staged.isEmpty && model.unstaged.isEmpty {
-                            Text("No changes — working tree is clean")
+                            Text("No changes. The working tree is clean.")
                                 .font(AppType.rowDetail)
                                 .foregroundStyle(AppTheme.muted)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3455,6 +3540,9 @@ private struct ChangesPanel: View {
                     }
                 }
                 .scrollIndicators(.hidden)
+                // Every tab shares this view. A new identity per model resets
+                // the sections' paging state instead of carrying it over.
+                .id(ObjectIdentifier(model))
             }
         }
     }
@@ -3486,7 +3574,7 @@ private struct ConflictResolutionGuide: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 12) {
-                Button("Abort \(operation.displayName)", role: .destructive) {
+                Button("Abort \(operation.displayName)…", role: .destructive) {
                     Task { await model.abortActiveOperation() }
                 }
                 .buttonStyle(.plain)
@@ -3786,11 +3874,19 @@ private struct CommitMessageInput: View {
         AICommitMessageProvider(rawValue: aiProviderRawValue) ?? .codex
     }
 
+    private var commitPlaceholder: String {
+        let branch = model.branch
+        guard !branch.isEmpty, branch != "detached HEAD" else {
+            return "Message (⌘Return to commit)"
+        }
+        return "Message (⌘Return to commit on \(branch))"
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             ZStack(alignment: .leading) {
                 if messageState.text.isEmpty {
-                    Text("Message (⌘Enter to commit on \"\(model.branch)\")")
+                    Text(commitPlaceholder)
                         .font(AppType.row)
                         .foregroundStyle(AppTheme.muted)
                         .lineLimit(1)
@@ -3813,7 +3909,11 @@ private struct CommitMessageInput: View {
             }
 
             Button {
-                Task { await model.generateCommitMessage() }
+                if model.isGeneratingCommitMessage {
+                    model.cancelCommitMessageGeneration()
+                } else {
+                    Task { await model.generateCommitMessage() }
+                }
             } label: {
                 Group {
                     if model.isGeneratingCommitMessage {
@@ -3830,20 +3930,26 @@ private struct CommitMessageInput: View {
             .buttonStyle(.plain)
             .foregroundStyle(AppTheme.primary.opacity(0.9))
             .padding(.top, 1)
-            .accessibilityLabel("Generate Commit Message from Staged Changes")
+            .accessibilityLabel(
+                model.isGeneratingCommitMessage
+                    ? "Stop Generating Commit Message"
+                    : "Generate Commit Message from Staged Changes"
+            )
             .help(
-                model.hasStagedChanges
+                model.isGeneratingCommitMessage
+                    ? "Stop Generating"
+                    : model.hasStagedChanges
                     ? (messageState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? "Generate a Commit Message from Staged Changes with \(aiProvider.displayName)"
                         : "Use This Text as Instructions for \(aiProvider.displayName)")
                     : "Stage changes before generating a commit message"
             )
             .disabled(
-                !model.hasStagedChanges
-                || model.isBusy
-                || model.isSavingRepositoryFile
-                || model.hasPendingChangeOperations
-                || model.isGeneratingCommitMessage
+                !model.isGeneratingCommitMessage
+                    && (!model.hasStagedChanges
+                        || model.isBusy
+                        || model.isSavingRepositoryFile
+                        || model.hasPendingChangeOperations)
             )
         }
         .padding(.horizontal, 10)
@@ -3887,99 +3993,108 @@ private struct SplitCommitButton: View {
             .contentShape(Rectangle())
             .disabled(!model.primaryActionEnabled)
 
-            if model.primaryAction != .publish {
-                Menu {
-                    if model.primaryAction == .commit {
-                        Button("Commit Staged Changes") {
-                            Task { await model.commit() }
-                        }
-                        .disabled(!model.hasStagedChanges)
-
-                        Button("Commit All Changes") {
-                            Task { await model.commitAll() }
-                        }
-
-                        Divider()
-
-                        Button("Amend Last Commit") {
-                            Task { await model.amend() }
-                        }
-
-                        Button("Amend Last Commit, Keep Message") {
-                            Task { await model.amendNoEdit() }
-                        }
-                        .disabled(!model.hasStagedChanges)
-
-                        Divider()
-
-                        Button(commitAndRemoteTitle) {
-                            Task { await commitAndRemote() }
-                        }
-
-                        if let operation = model.activeOperation {
-                            Divider()
-
-                            Button("Continue \(operation.displayName)") {
-                                Task { await model.continueActiveOperation() }
-                            }
-
-                            if model.canSkipActiveOperation {
-                                Button("Skip Current Commit") {
-                                    Task { await model.skipActiveOperation() }
-                                }
-                            }
-
-                            Button("Abort \(operation.displayName)…", role: .destructive) {
-                                Task { await model.abortActiveOperation() }
-                            }
-                        }
-                    } else {
-                        Button("Push") {
-                            Task { await model.push() }
-                        }
-
-                        Button("Pull") {
-                            Task { await model.pull() }
-                        }
-
-                        Divider()
-
-                        Button("Force Push with Lease…") {
-                            Task { await model.forcePushWithLease() }
-                        }
-
-                        Button("Force Push Without Lease…") {
-                            Task { await model.forcePush() }
-                        }
-                    }
-                } label: {
-                    ZStack {
-                        Rectangle()
-                            .fill(buttonBackground)
-
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(buttonForeground)
-                    }
-                    .frame(width: Self.menuWidth, height: 32)
-                    .contentShape(Rectangle())
+            Menu {
+                Button("Commit Staged Changes") {
+                    Task { await model.commit() }
                 }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .tint(buttonForeground)
-                .frame(width: Self.menuWidth, height: 32)
-                .background(buttonBackground)
-                .overlay(alignment: .leading) {
+                .disabled(!model.hasStagedChanges)
+
+                Button("Commit All Changes") {
+                    Task { await model.commitAll() }
+                }
+                .disabled(!model.hasChanges)
+
+                Divider()
+
+                Button("Amend Last Commit") {
+                    Task { await model.amend() }
+                }
+                .disabled(model.headHash == nil)
+
+                Button("Amend Last Commit, Keep Message") {
+                    Task { await model.amendNoEdit() }
+                }
+                .disabled(!model.hasStagedChanges || model.headHash == nil)
+
+                if model.isAmendingCommit {
+                    Button("Cancel Amend") {
+                        model.cancelAmend()
+                    }
+                }
+
+                Divider()
+
+                Button(commitAndRemoteTitle) {
+                    Task { await commitAndRemote() }
+                }
+                .disabled(!model.hasChanges)
+
+                if let operation = model.activeOperation {
+                    Divider()
+
+                    Button("Continue \(operation.displayName)") {
+                        Task { await model.continueActiveOperation() }
+                    }
+
+                    if model.canSkipActiveOperation {
+                        Button("Skip Current Commit") {
+                            Task { await model.skipActiveOperation() }
+                        }
+                    }
+
+                    Button("Abort \(operation.displayName)…", role: .destructive) {
+                        Task { await model.abortActiveOperation() }
+                    }
+                }
+
+                if model.primaryAction == .sync {
+                    Divider()
+
+                    Button("Push") {
+                        Task { await model.push() }
+                    }
+
+                    Button("Pull") {
+                        Task { await model.pull() }
+                    }
+
+                    Divider()
+
+                    Button("Force Push with Lease…") {
+                        Task { await model.forcePushWithLease() }
+                    }
+
+                    Button("Force Push Without Lease…") {
+                        Task { await model.forcePush() }
+                    }
+                }
+            } label: {
+                ZStack {
                     Rectangle()
-                        .fill(buttonForeground.opacity(0.32))
-                        .frame(width: 1)
-                        .padding(.vertical, 5)
+                        .fill(buttonBackground)
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(menuForeground)
                 }
+                .frame(width: Self.menuWidth, height: 32)
                 .contentShape(Rectangle())
-                .help(actionMenuLabel)
-                .accessibilityLabel(actionMenuLabel)
             }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .tint(menuForeground)
+            .frame(width: Self.menuWidth, height: 32)
+            .background(buttonBackground)
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(buttonForeground.opacity(0.32))
+                    .frame(width: 1)
+                    .padding(.vertical, 5)
+            }
+            .contentShape(Rectangle())
+            .help(actionMenuLabel)
+            .accessibilityLabel(actionMenuLabel)
         }
         .foregroundStyle(buttonForeground)
         .frame(height: 32)
@@ -4000,6 +4115,13 @@ private struct SplitCommitButton: View {
         model.primaryActionEnabled
             ? AppTheme.onAccent
             : AppTheme.muted
+    }
+
+    /// The menu can offer Amend even when the primary action has nothing to
+    /// do, so its chevron follows its own availability.
+    private var menuForeground: Color {
+        if actionsDisabled { return AppTheme.muted }
+        return model.primaryActionEnabled ? AppTheme.onAccent : AppTheme.primary
     }
 
     private var actionMenuLabel: String {
@@ -4117,9 +4239,8 @@ private struct FileSection: View {
                         .frame(minWidth: 20, minHeight: 20)
                         .background(AppTheme.badgeBlue, in: Capsule())
                         .help(
-                            title == "Changes"
-                                ? "\(changes.count) unstaged changes"
-                                : "\(changes.count) staged changes"
+                            "\(changes.count) \(title == "Changes" ? "unstaged" : "staged") "
+                                + (changes.count == 1 ? "change" : "changes")
                         )
                 }
             }
@@ -4330,7 +4451,7 @@ private struct LargeChangeGroupHeader: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Back to change folders")
-            .help("Back to change folders")
+            .help("Back to Change Folders")
 
             Text(group.title)
                 .font(.system(size: 13, weight: .semibold))
@@ -4386,7 +4507,7 @@ private struct PaginationButtons: View {
             .buttonStyle(.plain)
             .disabled(page == 0)
             .accessibilityLabel("Previous page")
-            .help("Previous page")
+            .help("Previous Page")
 
             Text("\(page + 1)/\(pageCount)")
                 .font(.system(size: 11, design: .monospaced))
@@ -4398,7 +4519,7 @@ private struct PaginationButtons: View {
             .buttonStyle(.plain)
             .disabled(page + 1 >= pageCount)
             .accessibilityLabel("Next page")
-            .help("Next page")
+            .help("Next Page")
         }
     }
 }
@@ -4407,7 +4528,6 @@ private struct FileChangeRow: View {
     @EnvironmentObject private var model: RepositoryModel
     let change: FileChange
     @State private var hovering = false
-    @State private var discardConfirmationPresented = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -4479,14 +4599,6 @@ private struct FileChangeRow: View {
             hoverActions
         }
         .onHover { hovering = $0 }
-        .alert(discardConfirmationTitle, isPresented: $discardConfirmationPresented) {
-            Button(discardConfirmationAction, role: .destructive) {
-                Task { await model.discard(change) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(discardConfirmationMessage)
-        }
         .contextMenu {
             if isResolvableConflict {
                 Button("Resolve Conflict") {
@@ -4504,9 +4616,10 @@ private struct FileChangeRow: View {
                 }
 
                 if change.area == .unstaged {
-                    Button("Discard Changes…") {
-                        discardConfirmationPresented = true
+                    Button(change.status == "U" ? "Delete…" : "Discard Changes…") {
+                        confirmDiscard()
                     }
+                    .disabled(operationDisabled)
 
                     Divider()
                 }
@@ -4526,12 +4639,14 @@ private struct FileChangeRow: View {
             }
             .disabled(!model.canOpenInFiles(change))
 
-            Button("Reveal in Finder") {
-                revealRepositoryFileInFinder(change.path, repositoryURL: model.repositoryURL)
+            if model.sshRepository == nil {
+                Button("Reveal in Finder") {
+                    revealRepositoryFileInFinder(change.path, repositoryURL: model.repositoryURL)
+                }
             }
 
             Button("Copy Path") {
-                copyRepositoryFilePath(change.path, repositoryURL: model.repositoryURL)
+                copyRepositoryFilePath(change.path, in: model)
             }
         }
         .accessibilityActions {
@@ -4564,7 +4679,7 @@ private struct FileChangeRow: View {
 
             if change.area == .unstaged && !isResolvableConflict {
                 Button("Discard Changes in \(change.name)") {
-                    discardConfirmationPresented = true
+                    confirmDiscard()
                 }
                 .disabled(operationDisabled)
             }
@@ -4617,7 +4732,7 @@ private struct FileChangeRow: View {
                 .help("Restore the conflict versions and reopen the resolver")
             } else if change.area == .unstaged {
                 Button {
-                    discardConfirmationPresented = true
+                    confirmDiscard()
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
                         .font(.system(size: 12, weight: .semibold))
@@ -4643,6 +4758,7 @@ private struct FileChangeRow: View {
                 .accessibilityLabel(
                     change.area == .staged ? "Unstage \(change.name)" : "Stage \(change.name)"
                 )
+                .help(change.area == .staged ? "Unstage" : "Stage")
                 .disabled(operationDisabled)
             }
         }
@@ -4685,6 +4801,19 @@ private struct FileChangeRow: View {
         )
     }
 
+    private func confirmDiscard() {
+        let result = AppDialog.run(
+            title: discardConfirmationTitle,
+            message: discardConfirmationMessage,
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(title: discardConfirmationAction, role: .destructive)
+            ]
+        )
+        guard result.actionIndex == 1 else { return }
+        Task { await model.discard(change) }
+    }
+
     private var discardConfirmationTitle: String {
         change.status == "U" ? "Delete Untracked File?" : "Discard Changes?"
     }
@@ -4695,14 +4824,11 @@ private struct FileChangeRow: View {
 
     private var discardConfirmationMessage: String {
         if change.status == "U" {
-            return "Delete “\(change.path)” from disk. This action cannot be undone by Kvist."
+            return "Delete \"\(change.path)\" from disk. This action cannot be undone by Kvist."
         }
-        return "Discard all unstaged changes in “\(change.path)”. This action cannot be undone by Kvist."
+        return "Discard all unstaged changes in \"\(change.path)\". This action cannot be undone by Kvist."
     }
 
-    private var fileIcon: String {
-        FileGlyph.symbol(forPath: change.path)
-    }
 
     private var statusColor: Color {
         switch change.status {
@@ -4757,16 +4883,10 @@ private struct FileChangeRow: View {
     }
 }
 
-@MainActor
-private final class GraphNestedFileHoverState: ObservableObject {
-    @Published var hoveredID: String?
-}
-
 private struct GraphPanel: View {
     @EnvironmentObject private var model: RepositoryModel
     let isOpeningRepository: Bool
     @State private var revealHeadRequest = 0
-    @StateObject private var nestedFileHoverState = GraphNestedFileHoverState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -4781,7 +4901,6 @@ private struct GraphPanel: View {
                 GraphHistoryTable(revealHeadRequest: revealHeadRequest)
             }
         }
-        .environmentObject(nestedFileHoverState)
     }
 }
 
@@ -4916,6 +5035,7 @@ private struct GraphHistoryTable: NSViewRepresentable {
         private var revealHeadRequest = 0
         private var boundsObserver: NSObjectProtocol?
         private weak var hoveredNestedCell: GraphNestedTableCell?
+        private var selectedFileKey: String?
 
         init(model: RepositoryModel) {
             self.model = model
@@ -4974,6 +5094,20 @@ private struct GraphHistoryTable: NSViewRepresentable {
             graphPublicationVersion = model.graphPublicationVersion
             graphScope = model.graphScope
             expandedSignature = newExpandedSignature
+
+            // File cells draw their own selection fill, so repaint them when
+            // the selected historical file changes.
+            let newSelectedFileKey = model.selectedCommitFile.map {
+                "\(model.selectedCommit?.hash ?? "")\u{0}\($0.id)"
+            }
+            if newSelectedFileKey != selectedFileKey {
+                selectedFileKey = newSelectedFileKey
+                tableView.enumerateAvailableRowViews { rowView, _ in
+                    for case let cell as GraphNestedTableCell in rowView.subviews {
+                        cell.needsDisplay = true
+                    }
+                }
+            }
 
             if revealHeadRequest != self.revealHeadRequest {
                 self.revealHeadRequest = revealHeadRequest
@@ -5176,10 +5310,7 @@ private final class GraphCommitTableCell: NSView {
 
     func configure(row: GraphRow, model: RepositoryModel) {
         hostingView.rootView = AnyView(
-            GraphCommitRow(
-                row: row,
-                showsExpandedFiles: false
-            )
+            GraphCommitRow(row: row)
             .environmentObject(model)
         )
     }
@@ -5278,10 +5409,34 @@ private final class GraphNestedTableCell: NSView {
         return true
     }
 
+    private var isSelected: Bool {
+        guard let file, let model else { return false }
+        return model.selectedCommitFile == file
+            && model.selectedCommit?.hash == commit?.hash
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard file != nil else { return nil }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Copy Path", action: #selector(copyPath), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func copyPath() {
+        guard let file else { return }
+        guard let model else { return }
+        copyRepositoryFilePath(file.path, in: model)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let row else { return }
-        if hovering, file != nil {
+        if isSelected {
+            AppTheme.selectionNSColor.setFill()
+            dirtyRect.fill()
+        } else if hovering, file != nil {
             NSColor(AppTheme.hover).setFill()
             dirtyRect.fill()
         }
@@ -5396,123 +5551,14 @@ private struct GraphHeader: View {
                 .font(AppType.panelTitle)
                 .tracking(0.8)
                 .foregroundStyle(AppTheme.secondary)
+                .fixedSize()
                 .accessibilityAddTraits(.isHeader)
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            HStack(spacing: 12) {
-                Menu {
-                    ForEach(GraphScope.allCases) { scope in
-                        Button {
-                            Task { await model.setGraphScope(scope) }
-                        } label: {
-                            if model.graphScope == scope {
-                                Label(
-                                    graphScopeDescription(scope),
-                                    systemImage: "checkmark"
-                                )
-                            } else {
-                                Text(graphScopeDescription(scope))
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        BranchGlyph(size: 14, color: AppTheme.primary)
-                        Text(model.graphScope.title)
-                    }
-                    .font(AppType.rowDetail)
-                    .frame(width: 72, height: 28, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .contentShape(Rectangle())
-                .fixedSize(horizontal: true, vertical: false)
-                .layoutPriority(1)
-                .tint(AppTheme.primary)
-                .accessibilityLabel("Graph Scope")
-                .accessibilityValue(graphScopeDescription(model.graphScope))
-                .disabled(operationsDisabled)
-
-                CodiconButton(icon: .target, help: "Reveal current HEAD", action: revealHead)
-                    .disabled(!headIsVisible || operationsDisabled)
-
-                CodiconButton(icon: .repoFetch, help: "Fetch all remotes") {
-                    Task { await model.fetch() }
-                }
-                .disabled(operationsDisabled)
-
-                Menu {
-                    Button("Pull") {
-                        Task { await model.pull() }
-                    }
-
-                    Button("Pull with Rebase") {
-                        Task { await model.pullRebasing() }
-                    }
-                } label: {
-                    CodiconGlyph(
-                        icon: .repoPull,
-                        size: 16,
-                        color: AppTheme.primary
-                    )
-                        .frame(width: 25, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .frame(width: 25, height: 28)
-                .contentShape(Rectangle())
-                .tint(AppTheme.primary)
-                .help("Pull")
-                .accessibilityLabel("Pull Options")
-                .disabled(
-                    operationsDisabled || !model.hasUpstream
-                )
-
-                CodiconButton(
-                    icon: .repoPush,
-                    help: model.hasUpstream ? "Push" : "Publish Branch"
-                ) {
-                    Task { await model.pushOrPublish() }
-                }
-                .disabled(
-                    operationsDisabled
-                        || (!model.hasUpstream
-                            && (model.branch == "detached HEAD" || model.headHash == nil))
-                )
-
-                Menu {
-                    Button("Force Push with Lease…") {
-                        Task { await model.forcePushWithLease() }
-                    }
-
-                    Button("Force Push Without Lease…") {
-                        Task { await model.forcePush() }
-                    }
-                } label: {
-                    Image(systemName: "cloud.bolt")
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(AppTheme.primary)
-                        .frame(width: 25, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .frame(width: 25, height: 28)
-                .contentShape(Rectangle())
-                .tint(AppTheme.primary)
-                .help("Force Push")
-                .accessibilityLabel("Force Push")
-                .disabled(
-                    operationsDisabled
-                        || !model.hasUpstream
-                        || model.branch == "detached HEAD"
-                )
-
-                repositoryMenu
-
+            ViewThatFits(in: .horizontal) {
+                controls(spacing: 12, showsScopeTitle: true)
+                controls(spacing: 6, showsScopeTitle: false)
             }
         }
         .foregroundStyle(AppTheme.primary)
@@ -5520,6 +5566,127 @@ private struct GraphHeader: View {
         .padding(.trailing, 21)
         .frame(maxWidth: .infinity)
         .frame(height: 34)
+    }
+
+    /// Narrow panes drop the scope title and tighten the spacing so every
+    /// control stays visible.
+    private func controls(spacing: CGFloat, showsScopeTitle: Bool) -> some View {
+        HStack(spacing: spacing) {
+            Menu {
+                ForEach(GraphScope.allCases) { scope in
+                    Button {
+                        Task { await model.setGraphScope(scope) }
+                    } label: {
+                        if model.graphScope == scope {
+                            Label(
+                                graphScopeDescription(scope),
+                                systemImage: "checkmark"
+                            )
+                        } else {
+                            Text(graphScopeDescription(scope))
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    BranchGlyph(size: 14, color: AppTheme.primary)
+                    if showsScopeTitle {
+                        Text(model.graphScope.title)
+                    }
+                }
+                .font(AppType.rowDetail)
+                .frame(width: showsScopeTitle ? 72 : 18, height: 28, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .contentShape(Rectangle())
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
+            .tint(AppTheme.primary)
+            .accessibilityLabel("Graph Scope")
+            .accessibilityValue(graphScopeDescription(model.graphScope))
+            .disabled(operationsDisabled)
+
+            CodiconButton(icon: .target, help: "Reveal Current HEAD", action: revealHead)
+                .disabled(!headIsVisible || operationsDisabled)
+
+            CodiconButton(icon: .repoFetch, help: "Fetch All Remotes") {
+                Task { await model.fetch() }
+            }
+            .disabled(operationsDisabled)
+
+            Menu {
+                Button("Pull") {
+                    Task { await model.pull() }
+                }
+
+                Button("Pull with Rebase") {
+                    Task { await model.pullRebasing() }
+                }
+            } label: {
+                CodiconGlyph(
+                    icon: .repoPull,
+                    size: 16,
+                    color: AppTheme.primary
+                )
+                    .frame(width: 25, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 25, height: 28)
+            .contentShape(Rectangle())
+            .tint(AppTheme.primary)
+            .help("Pull")
+            .accessibilityLabel("Pull Options")
+            .disabled(
+                operationsDisabled || !model.hasUpstream
+            )
+
+            CodiconButton(
+                icon: .repoPush,
+                help: model.hasUpstream ? "Push" : "Publish Branch"
+            ) {
+                Task { await model.pushOrPublish() }
+            }
+            .disabled(
+                operationsDisabled
+                    || (!model.hasUpstream
+                        && (model.branch == "detached HEAD" || model.headHash == nil))
+            )
+
+            Menu {
+                Button("Force Push with Lease…") {
+                    Task { await model.forcePushWithLease() }
+                }
+
+                Button("Force Push Without Lease…") {
+                    Task { await model.forcePush() }
+                }
+            } label: {
+                Image(systemName: "cloud.bolt")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(AppTheme.primary)
+                    .frame(width: 25, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 25, height: 28)
+            .contentShape(Rectangle())
+            .tint(AppTheme.primary)
+            .help("Force Push")
+            .accessibilityLabel("Force Push")
+            .disabled(
+                operationsDisabled
+                    || !model.hasUpstream
+                    || model.branch == "detached HEAD"
+            )
+
+            repositoryMenu
+
+        }
     }
 
     private var headIsVisible: Bool {
@@ -5623,13 +5790,7 @@ private struct GraphHeader: View {
 private struct GraphCommitRow: View {
     @EnvironmentObject private var model: RepositoryModel
     let row: GraphRow
-    let showsExpandedFiles: Bool
     @State private var hovering = false
-
-    init(row: GraphRow, showsExpandedFiles: Bool = true) {
-        self.row = row
-        self.showsExpandedFiles = showsExpandedFiles
-    }
 
     var body: some View {
         let presentedItems = GraphReferencePresentation.displayItems(
@@ -5707,24 +5868,6 @@ private struct GraphCommitRow: View {
                     commitContextMenu
                 }
             }
-
-            if showsExpandedFiles && isExpanded {
-                if model.loadingCommitFileHashes.contains(row.commit.hash) {
-                    GraphCommitLoadingRow(row: row)
-                } else if model.files(for: row.commit).isEmpty {
-                    GraphCommitEmptyRow(row: row)
-                } else {
-                    LazyVStack(spacing: 0) {
-                        ForEach(model.files(for: row.commit)) { file in
-                            GraphCommitFileRow(
-                                row: row,
-                                commit: row.commit,
-                                file: file
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -5781,7 +5924,7 @@ private struct GraphCommitRow: View {
 
     @ViewBuilder
     private var stashContextMenu: some View {
-        Button("Open Changes") {
+        Button("Show Changes") {
             model.openCommitChanges(row.commit)
         }
 
@@ -5797,7 +5940,7 @@ private struct GraphCommitRow: View {
         }
         .disabled(operationsDisabled)
 
-        Button("Drop Stash…") {
+        Button("Delete Stash…") {
             guard GitPrompt.confirmDelete(
                 kind: "stash",
                 name: row.commit.subject
@@ -5911,7 +6054,7 @@ private struct GraphCommitRow: View {
         }
 
         if !isHead, !model.branch.isEmpty, model.branch != "detached HEAD" {
-            Menu("Reset “\(model.branch)” to This Commit") {
+            Menu("Reset \"\(model.branch)\" to This Commit") {
                 Button("Soft Reset (Keep Changes Staged)…") {
                     Task { await model.reset(to: row.commit, mode: .soft) }
                 }
@@ -5978,9 +6121,9 @@ private struct GraphCommitRow: View {
     private func checkoutTitle(for reference: GitReference) -> String {
         switch reference.kind {
         case .tag:
-            return "Checkout Tag “\(reference.name)”"
+            return "Checkout Tag \"\(reference.name)\""
         case .localBranch, .remoteBranch, .other:
-            return "Checkout “\(reference.name)”"
+            return "Checkout \"\(reference.name)\""
         }
     }
 
@@ -6168,174 +6311,14 @@ enum GraphReferencePresentation {
     }
 }
 
-private struct GraphCommitLoadingRow: View {
-    let row: GraphRow
+@MainActor
+private func copyRepositoryFilePath(_ relativePath: String, in model: RepositoryModel) {
+    guard let repositoryURL = model.repositoryURL else { return }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            GraphExpansionTopology(row: row)
-
-            Color.clear
-                .frame(width: 10)
-
-            ProgressView()
-                .controlSize(.small)
-
-            Text("Loading changed files…")
-                .font(AppType.nestedRowDetail)
-                .foregroundStyle(AppTheme.secondary)
-
-            Spacer()
-        }
-        .padding(.leading, 9)
-        .padding(.trailing, 18)
-        .frame(height: 28)
-    }
-}
-
-private struct GraphCommitEmptyRow: View {
-    let row: GraphRow
-
-    var body: some View {
-        HStack(spacing: 8) {
-            GraphExpansionTopology(row: row)
-
-            Color.clear
-                .frame(width: 10)
-
-            Text("No changed files")
-                .font(AppType.nestedRowDetail)
-                .foregroundStyle(AppTheme.muted)
-
-            Spacer()
-        }
-        .padding(.leading, 9)
-        .padding(.trailing, 18)
-        .frame(height: 28)
-    }
-}
-
-private struct GraphCommitFileRow: View {
-    @EnvironmentObject private var model: RepositoryModel
-    let row: GraphRow
-    let commit: CommitInfo
-    let file: CommitFileChange
-
-    var body: some View {
-        GraphNestedFileRow(
-            row: row,
-            file: file,
-            hoverID: "\(commit.hash):\(file.id)",
-            isSelected: model.selectedCommit?.hash == commit.hash
-                && model.selectedCommitFile?.id == file.id
-        ) {
-            model.activate(file, in: commit)
-        }
-    }
-}
-
-/// Shared layout for the file rows nested under an expanded commit.
-private struct GraphNestedFileRow: View {
-    @EnvironmentObject private var model: RepositoryModel
-    @EnvironmentObject private var hoverState: GraphNestedFileHoverState
-    let row: GraphRow
-    let file: CommitFileChange
-    let hoverID: String
-    let isSelected: Bool
-    let select: () -> Void
-
-    var body: some View {
-        Button(action: select) {
-            HStack(spacing: 8) {
-                GraphExpansionTopology(row: row)
-
-                Color.clear
-                    .frame(width: 10)
-
-                FileIconView(path: file.path, size: 12, width: 18)
-
-                Text(file.name)
-                    .font(AppType.nestedRow)
-                    .foregroundStyle(AppTheme.primary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-
-                if !file.parentPath.isEmpty {
-                    Text(file.parentPath)
-                        .font(AppType.nestedRowDetail)
-                        .foregroundStyle(AppTheme.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-
-                Spacer(minLength: 4)
-
-                Text(file.status)
-                    .font(AppType.nestedStatusLetter)
-                    .foregroundStyle(statusColor)
-                    .frame(width: 16, alignment: .trailing)
-                    .accessibilityLabel(statusDescription)
-                    .help(statusDescription)
-            }
-            .padding(.leading, 9)
-            .padding(.trailing, 19)
-            .frame(height: 28)
-            .contentShape(Rectangle())
-            .background(
-                isSelected
-                    ? AppTheme.selection
-                    : (hoverState.hoveredID == hoverID ? AppTheme.hover : .clear)
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            if hovering {
-                hoverState.hoveredID = hoverID
-            } else if hoverState.hoveredID == hoverID {
-                hoverState.hoveredID = nil
-            }
-        }
-        .help(file.previousPath.map { "\($0) → \(file.path)" } ?? file.path)
-        .contextMenu {
-            Button("Copy Path") {
-                copyRepositoryFilePath(file.path, repositoryURL: model.repositoryURL)
-            }
-        }
-    }
-
-    private var fileIcon: String {
-        FileGlyph.symbol(forPath: file.path)
-    }
-
-    private var statusColor: Color {
-        switch file.status {
-        case "A": return AppTheme.added
-        case "D": return AppTheme.deleted
-        case "R", "C": return AppTheme.graphBlue
-        default: return AppTheme.modified
-        }
-    }
-
-    private var statusDescription: String {
-        switch file.status {
-        case "A": return "Added"
-        case "D": return "Deleted"
-        case "R": return "Renamed"
-        case "C": return "Copied"
-        default: return "Modified"
-        }
-    }
-}
-
-private func copyRepositoryFilePath(_ relativePath: String, repositoryURL: URL?) {
-    guard let repositoryURL else { return }
-
-    let path = URL(
-        fileURLWithPath: relativePath,
-        relativeTo: repositoryURL
-    )
-    .standardizedFileURL
-    .path
+    let path = model.sshRepository?.location(ofRelativePath: relativePath)
+        ?? URL(fileURLWithPath: relativePath, relativeTo: repositoryURL)
+            .standardizedFileURL
+            .path
 
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(path, forType: .string)
@@ -6351,37 +6334,6 @@ private func revealRepositoryFileInFinder(_ relativePath: String, repositoryURL:
     .standardizedFileURL
 
     NSWorkspace.shared.activateFileViewerSelecting([url])
-}
-
-private struct GraphExpansionTopology: View {
-    let row: GraphRow
-
-    private let laneWidth: CGFloat = 11
-    private let rowHeight: CGFloat = 28
-
-    var body: some View {
-        Canvas(opaque: false, rendersAsynchronously: true) { context, _ in
-            for (index, lane) in row.outputLanes.enumerated() {
-                let x = laneWidth * CGFloat(index + 1)
-                var path = Path()
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: rowHeight))
-                context.stroke(
-                    path,
-                    with: .color(lane.color.swiftUIColor),
-                    lineWidth: 1.2
-                )
-            }
-        }
-        .frame(width: graphWidth, height: rowHeight)
-        .accessibilityHidden(true)
-    }
-
-    private var graphWidth: CGFloat {
-        laneWidth * CGFloat(
-            max(row.inputLanes.count, row.outputLanes.count, 1) + 1
-        )
-    }
 }
 
 @MainActor
@@ -6448,7 +6400,7 @@ private enum GitPrompt {
     static func branchName(from branch: String) -> String? {
         let source = branch.isEmpty || branch == "detached HEAD"
             ? "the current HEAD"
-            : "“\(branch)”"
+            : "\"\(branch)\""
         return text(
             title: "Create Branch",
             message: "Create and check out a branch from \(source).",
@@ -6459,9 +6411,13 @@ private enum GitPrompt {
     static func renamedBranch(_ reference: GitReference) -> String? {
         let result = AppDialog.run(
             title: "Rename Branch",
-            message: "Rename “\(reference.name)”. Remote branches are not renamed automatically.",
+            message: "Rename \"\(reference.name)\". Remote branches are not renamed automatically.",
             fields: [
-                AppDialogField(label: "New branch name", placeholder: reference.name)
+                AppDialogField(
+                    label: "New branch name",
+                    placeholder: reference.name,
+                    value: reference.name
+                )
             ],
             actions: [
                 AppDialogAction(title: "Cancel", role: .cancel),
@@ -6504,7 +6460,7 @@ private enum GitPrompt {
                 AppDialogField(label: "SSH host", placeholder: "user@example.com"),
                 AppDialogField(
                     label: "Remote path",
-                    placeholder: "Optional — leave empty to browse",
+                    placeholder: "Optional. Leave empty to browse.",
                     isRequired: false
                 )
             ],
@@ -6556,9 +6512,13 @@ private enum GitPrompt {
     static func remoteURL(for remote: GitRemote) -> String? {
         let result = AppDialog.run(
             title: "Edit Remote",
-            message: "Replace the fetch URL for “\(remote.name)”.\nCurrent URL: \(remote.fetchURL)",
+            message: "Replace the fetch URL for \"\(remote.name)\".",
             fields: [
-                AppDialogField(label: "Repository URL", placeholder: remote.fetchURL)
+                AppDialogField(
+                    label: "Repository URL",
+                    placeholder: remote.fetchURL,
+                    value: remote.fetchURL
+                )
             ],
             actions: [
                 AppDialogAction(title: "Cancel", role: .cancel),
@@ -6567,7 +6527,8 @@ private enum GitPrompt {
         )
         guard result.actionIndex == 1,
               let value = result.values.first,
-              !value.isEmpty else { return nil }
+              !value.isEmpty,
+              value != remote.fetchURL else { return nil }
         return value
     }
 
@@ -6598,7 +6559,7 @@ private enum GitPrompt {
     static func confirmDelete(kind: String, name: String) -> Bool {
         let result = AppDialog.run(
             title: "Delete \(kind.capitalized)?",
-            message: "Delete “\(name)” from this repository. This action cannot be undone by Kvist.",
+            message: "Delete \"\(name)\" from this repository. This action cannot be undone by Kvist.",
             actions: [
                 AppDialogAction(title: "Cancel", role: .cancel),
                 AppDialogAction(title: "Delete", role: .destructive)
@@ -6911,7 +6872,7 @@ private struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
-            Button("Rename “\(reference.name)”…") {
+            Button("Rename \"\(reference.name)\"…") {
                 guard let name = GitPrompt.renamedBranch(reference) else { return }
                 Task { await model.renameBranch(reference, to: name) }
             }
@@ -6920,7 +6881,7 @@ private struct ReferenceContextMenuItems: View {
             if !reference.isHead {
                 Divider()
 
-                Button("Delete Branch “\(reference.name)”…", role: .destructive) {
+                Button("Delete Branch \"\(reference.name)\"…", role: .destructive) {
                     Task { await model.deleteBranchWithConfirmation(reference) }
                 }
                 .disabled(operationsDisabled)
@@ -6947,7 +6908,7 @@ private struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
-            Button("Delete Remote Branch “\(reference.name)”…", role: .destructive) {
+            Button("Delete Remote Branch \"\(reference.name)\"…", role: .destructive) {
                 Task { await model.deleteBranchWithConfirmation(reference) }
             }
             .disabled(operationsDisabled)
@@ -6981,7 +6942,7 @@ private struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
-            Button("Delete Tag “\(reference.name)”…", role: .destructive) {
+            Button("Delete Tag \"\(reference.name)\"…", role: .destructive) {
                 guard GitPrompt.confirmDelete(
                     kind: "tag",
                     name: reference.name
@@ -7000,7 +6961,7 @@ private struct ReferenceContextMenuItems: View {
     @ViewBuilder
     private var mergeIntoCurrentButton: some View {
         if model.canFastForward(to: reference) {
-            Button("Fast-Forward “\(model.branch)” to “\(reference.name)”") {
+            Button("Fast-Forward \"\(model.branch)\" to \"\(reference.name)\"") {
                 Task {
                     await model.integrate(
                         reference,
@@ -7010,7 +6971,7 @@ private struct ReferenceContextMenuItems: View {
             }
             .disabled(operationsDisabled)
         } else {
-            Button("Merge “\(reference.name)” into “\(model.branch)”") {
+            Button("Merge \"\(reference.name)\" into \"\(model.branch)\"") {
                 Task {
                     await model.integrate(
                         reference,
@@ -7027,7 +6988,7 @@ private struct ReferenceContextMenuItems: View {
         if rebaseTargets.count == 1, let target = rebaseTargets.first {
             rebaseButton(onto: target, includesBranchName: true)
         } else if !rebaseTargets.isEmpty {
-            Menu("Rebase “\(reference.name)” onto") {
+            Menu("Rebase \"\(reference.name)\" onto") {
                 if !localRebaseTargets.isEmpty {
                     Section("Branches") {
                         ForEach(localRebaseTargets) { target in
@@ -7054,7 +7015,7 @@ private struct ReferenceContextMenuItems: View {
     ) -> some View {
         Button(
             includesBranchName
-                ? "Rebase “\(reference.name)” onto “\(target.name)”"
+                ? "Rebase \"\(reference.name)\" onto \"\(target.name)\""
                 : target.name
         ) {
             Task { await model.rebase(reference, onto: target) }
@@ -7071,8 +7032,8 @@ private struct ReferenceContextMenuItems: View {
 
     private var checkoutTitle: String {
         reference.kind == .tag
-            ? "Checkout Tag “\(reference.name)”"
-            : "Checkout “\(reference.name)”"
+            ? "Checkout Tag \"\(reference.name)\""
+            : "Checkout \"\(reference.name)\""
     }
 
     @ViewBuilder
@@ -7257,7 +7218,7 @@ private struct BranchPill: View {
                 : "Local branch: \(reference.name)"
             guard !syncedRemotes.isEmpty else { return base }
             let names = syncedRemotes.map(\.name).joined(separator: ", ")
-            return "\(base) — in sync with \(names)"
+            return "\(base), in sync with \(names)"
         case .remoteBranch:
             return "Remote branch: \(reference.name)"
         case .tag:
@@ -7287,16 +7248,28 @@ private extension GraphLaneColor {
 
 private struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(AppTheme.onAccent)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                configuration.isPressed
-                    ? AppTheme.actionBlue.opacity(0.78)
-                    : AppTheme.actionBlue
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+        PrimaryButtonBody(configuration: configuration)
+    }
+
+    /// ButtonStyle has no access to the enabled state; a view does.
+    private struct PrimaryButtonBody: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(isEnabled ? AppTheme.onAccent : AppTheme.muted)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    !isEnabled
+                        ? AppTheme.disabledFill
+                        : configuration.isPressed
+                            ? AppTheme.actionBlue.opacity(0.78)
+                            : AppTheme.actionBlue
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
     }
 }
 

@@ -3,6 +3,10 @@ import SwiftUI
 
 struct DiffDocument: NSViewRepresentable, Equatable {
     let text: String
+    /// Text that changes under the same ID is an update of the same diff,
+    /// such as after the file was edited elsewhere. The view then keeps its
+    /// scroll position instead of starting over at the top.
+    var documentID: UUID?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(palette: AppTheme.palette)
@@ -41,6 +45,7 @@ struct DiffDocument: NSViewRepresentable, Equatable {
         textView.setAccessibilityLabel("Diff")
         context.coordinator.attach(to: textView)
         scrollView.documentView = textView
+        context.coordinator.documentID = documentID
         context.coordinator.install(text, in: textView)
         return scrollView
     }
@@ -49,12 +54,15 @@ struct DiffDocument: NSViewRepresentable, Equatable {
         guard let textView = scrollView.documentView as? DiffTextView else { return }
         textView.backgroundColor = AppTheme.diffCanvasNSColor
         guard context.coordinator.text != text else { return }
-        context.coordinator.install(text, in: textView)
+        let isUpdate = documentID != nil && documentID == context.coordinator.documentID
+        context.coordinator.documentID = documentID
+        context.coordinator.install(text, in: textView, keepingPlace: isUpdate)
     }
 
     @MainActor
     final class Coordinator {
         var text: String?
+        var documentID: UUID?
         private var preparationTask: Task<Void, Never>?
         private let contentDelegate: DiffTextContentDelegate
 
@@ -68,11 +76,15 @@ struct DiffDocument: NSViewRepresentable, Equatable {
             contentStorage.delegate = contentDelegate
         }
 
-        func install(_ text: String, in textView: DiffTextView) {
+        func install(_ text: String, in textView: DiffTextView, keepingPlace: Bool = false) {
             self.text = text
             preparationTask?.cancel()
-            textView.isPreparingDiff = true
-            textView.string = "Preparing diff…"
+            // An update keeps the current diff on screen while the new one
+            // is formatted.
+            if !keepingPlace {
+                textView.isPreparingDiff = true
+                textView.string = "Preparing diff…"
+            }
 
             let formattingTask = Task.detached(priority: .userInitiated) {
                 DiffDocumentFormatter.formattedDocument(for: text)
@@ -92,9 +104,18 @@ struct DiffDocument: NSViewRepresentable, Equatable {
                 for range in formatted.emphasisRanges {
                     attributed.addAttribute(.diffEmphasis, value: true, range: range)
                 }
+                let clipView = textView.enclosingScrollView?.contentView
+                let origin = clipView?.bounds.origin
                 textView.textStorage?.setAttributedString(attributed)
                 textView.isPreparingDiff = false
-                textView.scrollToBeginningOfDocument(nil)
+                if keepingPlace, let clipView, let origin {
+                    textView.layoutSubtreeIfNeeded()
+                    let maxY = max(0, textView.frame.height - clipView.bounds.height)
+                    clipView.scroll(to: NSPoint(x: origin.x, y: min(origin.y, maxY)))
+                    textView.enclosingScrollView?.reflectScrolledClipView(clipView)
+                } else {
+                    textView.scrollToBeginningOfDocument(nil)
+                }
             }
         }
 
@@ -141,6 +162,7 @@ enum DiffDocumentFormatter {
         var emphasisRanges: [NSRange] = []
         var oldLine: Int?
         var newLine: Int?
+        let scalars = text.unicodeScalars
         var sourceLineStart = text.startIndex
         var displayLine = 0
         var pendingRemoved: [PendingLine] = []
@@ -172,10 +194,15 @@ enum DiffDocumentFormatter {
             if displayLine.isMultiple(of: 1_024), Task.isCancelled {
                 return nil
             }
-            let remainder = text[sourceLineStart...]
-            let newline = remainder.firstIndex(of: "\n")
-            let sourceLineEnd = newline ?? text.endIndex
-            let line = text[sourceLineStart..<sourceLineEnd]
+            // Split on the "\n" scalar: in a CRLF file "\r\n" is a single
+            // Character, so a Character search would never find the break.
+            let newline = scalars[sourceLineStart...].firstIndex(of: "\n")
+            var lineEnd = newline ?? text.endIndex
+            if lineEnd > sourceLineStart,
+               scalars[scalars.index(before: lineEnd)] == "\r" {
+                lineEnd = scalars.index(before: lineEnd)
+            }
+            let line = Substring(scalars[sourceLineStart..<lineEnd])
 
             if line.hasPrefix("@@") {
                 flushPendingPairs()
@@ -185,10 +212,17 @@ enum DiffDocumentFormatter {
                     newLine = lineStart(from: components[2])
                 }
                 append(line, oldLine: nil, newLine: nil, to: &output, length: &outputLength)
-            } else if line.hasPrefix("diff --git")
-                        || line.hasPrefix("index ")
+            } else if line.hasPrefix("diff --git") {
+                flushPendingPairs()
+                oldLine = nil
+                newLine = nil
+                append(line, oldLine: nil, newLine: nil, to: &output, length: &outputLength)
+            } else if oldLine == nil, newLine == nil,
+                      line.hasPrefix("index ")
                         || line.hasPrefix("--- ")
                         || line.hasPrefix("+++ ") {
+                // Inside a hunk, "--- x" is a removed "-- x" line, such as
+                // an SQL comment, not a file header.
                 flushPendingPairs()
                 append(line, oldLine: nil, newLine: nil, to: &output, length: &outputLength)
             } else if line.hasPrefix("+") {
@@ -227,7 +261,7 @@ enum DiffDocumentFormatter {
 
             displayLine += 1
             guard let newline else { break }
-            sourceLineStart = text.index(after: newline)
+            sourceLineStart = scalars.index(after: newline)
         }
         flushPendingPairs()
         return DiffFormattedDocument(text: output, emphasisRanges: emphasisRanges)
@@ -512,7 +546,9 @@ private final class DiffTextContentDelegate: NSObject, NSTextContentStorageDeleg
             length: plainLine.length - contentLocation
         )
         let content = plainLine.substring(with: contentRange)
-        let kind = kind(for: content)
+        // Metadata lines have empty line-number columns, so the marker sits
+        // right after the three leading tabs.
+        let kind = kind(for: content, hasLineNumbers: markerRange.location > 3)
 
         if let background = backgroundColor(for: kind) {
             line.addAttribute(.backgroundColor, value: background, range: fullRange)
@@ -544,9 +580,10 @@ private final class DiffTextContentDelegate: NSObject, NSTextContentStorageDeleg
         }
     }
 
-    private func kind(for content: String) -> Kind {
+    private func kind(for content: String, hasLineNumbers: Bool) -> Kind {
         if content.hasPrefix("@@") { return .hunk }
-        if content.hasPrefix("diff --git")
+        if !hasLineNumbers,
+           content.hasPrefix("diff --git")
             || content.hasPrefix("index ")
             || content.hasPrefix("--- ")
             || content.hasPrefix("+++ ") {

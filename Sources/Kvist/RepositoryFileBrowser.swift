@@ -337,13 +337,19 @@ private struct RepositoryFileTreeRow: View {
             .accessibilityHint(accessibilityHint)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             .contextMenu {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                if model.sshRepository == nil {
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                    }
                 }
 
                 Button("Copy Path") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(item.url.path, forType: .string)
+                    NSPasteboard.general.setString(
+                        model.sshRepository?.location(ofRelativePath: item.relativePath)
+                            ?? item.url.path,
+                        forType: .string
+                    )
                 }
             }
 

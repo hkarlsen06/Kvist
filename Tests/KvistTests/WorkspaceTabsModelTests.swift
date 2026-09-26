@@ -274,6 +274,36 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.activeTabID, firstTab.id)
     }
 
+    func testRestoredTabWithMissingFolderStaysAndLoadsWhenTheFolderReturns() async throws {
+        let defaults = isolatedDefaults()
+        let parentURL = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: parentURL) }
+        let repositoryURL = parentURL.appendingPathComponent("repo", isDirectory: true)
+        defaults.set([repositoryURL.path], forKey: "openRepositoryPaths")
+
+        let tabsModel = WorkspaceTabsModel(defaults: defaults)
+        let tab = tabsModel.activeTab
+
+        XCTAssertEqual(tabsModel.tabs.count, 1)
+        XCTAssertTrue(tab.isFolderMissing)
+        XCTAssertFalse(tab.isRepositoryLoadPending)
+        XCTAssertEqual(
+            defaults.stringArray(forKey: "openRepositoryPaths"),
+            [repositoryURL.path]
+        )
+
+        try FileManager.default.createDirectory(at: repositoryURL, withIntermediateDirectories: true)
+        try GitClient.initializeRepository(at: repositoryURL, createGitIgnore: false)
+        tabsModel.retryMissingActiveTab()
+
+        XCTAssertFalse(tab.isFolderMissing)
+        await waitForRepository(repositoryURL, in: tab.model)
+        XCTAssertEqual(
+            tab.model.repositoryURL?.resolvingSymlinksInPath(),
+            repositoryURL.resolvingSymlinksInPath()
+        )
+    }
+
     func testRestoredPlainFolderLeavesLoadingStateForRepositorySetup() async throws {
         let defaults = isolatedDefaults()
         let folderURL = try temporaryDirectory()
@@ -447,9 +477,10 @@ final class WorkspaceTabsModelTests: XCTestCase {
         tabsModel.removeRecentRepository(path: existingURL.path)
 
         XCTAssertTrue(tabsModel.recentRepositoryURLs.isEmpty)
+        // A missing folder may be an unmounted volume, so it stays saved.
         XCTAssertEqual(
             defaults.stringArray(forKey: "recentRepositoryPaths"),
-            []
+            [missingPath]
         )
     }
 

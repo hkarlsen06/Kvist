@@ -327,12 +327,31 @@ struct RemoteCommandResult: Sendable {
 private final class GitCommandOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private var lastAppend = Date()
 
     func append(_ newData: Data) {
         guard !newData.isEmpty else { return }
         lock.lock()
         data.append(newData)
+        lastAppend = Date()
         lock.unlock()
+    }
+
+    /// When output last arrived, or when the buffer was created.
+    var lastActivity: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastAppend
+    }
+
+    /// Reads the handle in chunks until end of file, so `lastActivity`
+    /// tracks progress while the command runs.
+    func drain(_ handle: FileHandle) {
+        // availableData returns as soon as any output arrives; it is empty
+        // only at end of file.
+        while case let chunk = handle.availableData, !chunk.isEmpty {
+            append(chunk)
+        }
     }
 
     func value() -> Data {
@@ -542,7 +561,9 @@ struct SSHRepository: Codable, Equatable, Sendable {
         let allowedHostCharacters = CharacterSet.alphanumerics.union(
             CharacterSet(charactersIn: "@._-")
         )
+        // A leading "-" would reach rsync and scp as an option.
         guard !host.isEmpty,
+              !host.hasPrefix("-"),
               host.unicodeScalars.allSatisfy(allowedHostCharacters.contains) else {
             throw GitCommandError(
                 command: "ssh",
@@ -554,6 +575,26 @@ struct SSHRepository: Codable, Equatable, Sendable {
 
     var displayName: String {
         URL(fileURLWithPath: path).lastPathComponent
+    }
+}
+
+extension SSHRepository {
+    /// The remote location a local mirror folder stands for, read from the
+    /// marker file Kvist writes when it opens a folder over SSH.
+    static func mirrored(at url: URL) -> SSHRepository? {
+        guard let data = try? Data(contentsOf: url.appendingPathComponent(SSHMirrorStore.markerName)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SSHRepository.self, from: data)
+    }
+
+    /// `host:/path`, the form `scp` and `rsync` accept. The local mirror
+    /// path means nothing outside Kvist, so this is what the UI shows and copies.
+    func location(ofRelativePath relativePath: String = "") -> String {
+        let fullPath = relativePath.isEmpty
+            ? path
+            : (path as NSString).appendingPathComponent(relativePath)
+        return "\(host):\(fullPath)"
     }
 }
 
@@ -627,6 +668,9 @@ struct GitClient: Sendable {
         environment["LC_ALL"] = "C"
         environment["LANG"] = "C"
         environment["GIT_OPTIONAL_LOCKS"] = "0"
+        // Paths are file names, not globs. Without this, discarding
+        // `app/[slug]/page.tsx` also discards `app/s/page.tsx`.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GCM_INTERACTIVE"] = "Never"
         environment["GIT_EDITOR"] = "true"
@@ -751,7 +795,7 @@ struct GitClient: Sendable {
 
         do {
             _ = try GitClient(repositoryURL: parent).run([
-                "clone", "--", source, destination.path
+                "clone", "--progress", "--", source, destination.path
             ], timeout: 300)
         } catch {
             // Git creates the destination before transferring objects. Remove
@@ -876,7 +920,8 @@ struct GitClient: Sendable {
 
         let listScript = """
         cd \(Self.shellQuote(root)) || exit 1
-        find . -name .git -prune -o -type f -print0
+        find . -name .git -prune -o -type f -print0 2>/dev/null
+        exit 0
         """
         let pathsOutput = String(
             decoding: try runShellScript(listScript),
@@ -937,27 +982,58 @@ struct GitClient: Sendable {
                 command: Self.posixShellCommand(script)
             )
         }
+        let result = try Self.runHelper(
+            URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", script]
+        )
+        guard result.status == 0 else {
+            throw GitCommandError(
+                command: "sh",
+                output: String(decoding: result.error, as: UTF8.self)
+            )
+        }
+        return result.output
+    }
+
+    /// Runs a helper tool such as `sh`, `ssh`, or `rsync`. Both pipes drain at
+    /// the same time, so a chatty stderr cannot stall the process, and a
+    /// cancelled task terminates it instead of waiting for it to finish.
+    private static func runHelper(
+        _ executableURL: URL,
+        arguments: [String],
+        input: Data? = nil
+    ) throws -> (status: Int32, output: Data, error: Data) {
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", script]
-        process.environment = Self.commandEnvironment
-        process.standardInput = FileHandle.nullDevice
+        let inputPipe = Pipe()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.environment = commandEnvironment
+        process.standardInput = input == nil ? FileHandle.nullDevice : inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let error = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        try Task.checkCancellation()
-        guard process.terminationStatus == 0 else {
-            throw GitCommandError(
-                command: "sh",
-                output: String(data: error, encoding: .utf8) ?? ""
-            )
+        if let input {
+            Self.write(input, to: inputPipe)
         }
-        return output
+
+        let output = GitCommandOutputBuffer()
+        let error = GitCommandOutputBuffer()
+        let reads = DispatchGroup()
+        for (pipe, buffer) in [(outputPipe, output), (errorPipe, error)] {
+            DispatchQueue.global(qos: .userInitiated).async(group: reads) {
+                buffer.append(pipe.fileHandleForReading.readDataToEndOfFile())
+            }
+        }
+        while exited.wait(timeout: .now() + .milliseconds(50)) == .timedOut {
+            if Task.isCancelled { process.terminate() }
+        }
+        reads.wait()
+        try Task.checkCancellation()
+        return (process.terminationStatus, output.value(), error.value())
     }
 
     func sshDirectoryEntries(relativePath: String) throws -> [SSHFileEntry] {
@@ -966,7 +1042,7 @@ struct GitClient: Sendable {
             .appendingPathComponent(relativePath)
             .path
         let command = """
-        find \(Self.shellQuote(directory)) -mindepth 1 -maxdepth 1 -exec sh -c '\
+        find -H \(Self.shellQuote(directory)) -mindepth 1 -maxdepth 1 -exec sh -c '\
         for item do \
         if [ -L "$item" ]; then type=l; \
         elif [ -d "$item" ]; then type=d; \
@@ -1013,6 +1089,19 @@ struct GitClient: Sendable {
             "\(sshRepository.host):\(Self.shellQuote(remotePath))",
             fileURL.path
         ])
+    }
+
+    /// The current bytes of a file on the SSH host, used to detect edits
+    /// made on the server since Kvist downloaded its copy.
+    func remoteFileContents(relativePath: String) throws -> Data {
+        guard let sshRepository else { return Data() }
+        let remotePath = URL(fileURLWithPath: sshRepository.path)
+            .appendingPathComponent(relativePath)
+            .path
+        return try Self.runSSH(
+            host: sshRepository.host,
+            command: "cat -- \(Self.shellQuote(remotePath))"
+        )
     }
 
     func uploadSSHFile(_ fileURL: URL, relativePath: String) throws {
@@ -1346,7 +1435,7 @@ struct GitClient: Sendable {
                     "--date-order",
                     "--skip=\(offset)",
                     "--max-count=2050"
-                ] + revisions)
+                ] + revisions + ["--"])
                 paginationState.historyHashLength = hashOutput.firstIndex(of: "\n")
                     .map { hashOutput.distance(from: hashOutput.startIndex, to: $0) }
                     ?? hashOutput.utf8.count
@@ -1385,7 +1474,7 @@ struct GitClient: Sendable {
                 "--no-walk=unsorted",
                 "--date=relative",
                 format
-            ] + hashes)
+            ] + hashes + ["--"])
         } else {
             output = try run([
                 "log",
@@ -1393,7 +1482,7 @@ struct GitClient: Sendable {
                 "--date=relative",
                 "--max-count=\(requestedCount + 1)",
                 format
-            ] + revisions)
+            ] + revisions + ["--"])
         }
 
         let parsedCommits = parseHistory(
@@ -1720,19 +1809,9 @@ struct GitClient: Sendable {
 
     func discard(_ path: String, isUntracked: Bool) throws {
         if isUntracked {
-            if sshRepository != nil {
-                _ = try run(["clean", "-f", "--", path])
-                return
-            }
-            let root = repositoryURL.standardizedFileURL
-            let target = root.appendingPathComponent(path).standardizedFileURL
-            guard target.path.hasPrefix(root.path + "/") else {
-                throw GitCommandError(
-                    command: "discard -- \(path)",
-                    output: "The selected path is outside the repository."
-                )
-            }
-            try FileManager.default.removeItem(at: target)
+            // `git clean` keeps ignored files, such as a `.env`, inside an
+            // untracked folder.
+            _ = try run(["clean", "-f", "--", path])
             return
         }
 
@@ -1758,7 +1837,7 @@ struct GitClient: Sendable {
     }
 
     func discardAllChanges() throws {
-        _ = try run(["reset", "--hard", "HEAD"])
+        _ = try run(["reset", "--hard", "HEAD", "--"])
         _ = try run(["clean", "-fd"])
     }
 
@@ -1771,7 +1850,9 @@ struct GitClient: Sendable {
         if let message, !message.isEmpty {
             arguments.append(contentsOf: ["--message", message])
         }
-        return try run(arguments)
+        // Git skips untracked files in `stash push -u` when pathspecs are
+        // literal (checked with Git 2.54).
+        return try run(arguments, environmentOverrides: ["GIT_LITERAL_PATHSPECS": "0"])
     }
 
     func commit(message: String) throws -> String {
@@ -1789,7 +1870,7 @@ struct GitClient: Sendable {
     func fetch(timeout: TimeInterval = Self.networkOperationTimeout) throws -> String {
         do {
             return try run(
-                ["fetch", "--all", "--prune"],
+                ["fetch", "--all", "--prune", "--progress"],
                 timeout: timeout
             )
         } catch let error as GitCommandError {
@@ -1827,30 +1908,30 @@ struct GitClient: Sendable {
             }
             guard repaired else { throw error }
             return try run(
-                ["fetch", "--all", "--prune"],
+                ["fetch", "--all", "--prune", "--progress"],
                 timeout: timeout
             )
         }
     }
 
     func pull() throws -> String {
-        try run(["pull"], timeout: Self.networkOperationTimeout)
+        try run(["pull", "--progress"], timeout: Self.networkOperationTimeout)
     }
 
     func pullRebasing() throws -> String {
-        try run(["pull", "--rebase"], timeout: Self.networkOperationTimeout)
+        try run(["pull", "--rebase", "--progress"], timeout: Self.networkOperationTimeout)
     }
 
     func push() throws -> String {
-        try run(["push"], timeout: Self.networkOperationTimeout)
+        try run(["push", "--progress"], timeout: Self.networkOperationTimeout)
     }
 
     func forcePushWithLease() throws -> String {
-        try run(["push", "--force-with-lease"], timeout: Self.networkOperationTimeout)
+        try run(["push", "--force-with-lease", "--progress"], timeout: Self.networkOperationTimeout)
     }
 
     func forcePush() throws -> String {
-        try run(["push", "--force"], timeout: Self.networkOperationTimeout)
+        try run(["push", "--force", "--progress"], timeout: Self.networkOperationTimeout)
     }
 
     func rebaseIsInProgress() -> Bool {
@@ -2018,7 +2099,7 @@ struct GitClient: Sendable {
 
     func publish(branch: String) throws -> String {
         try run(
-            ["push", "--set-upstream", "origin", branch],
+            ["push", "--progress", "--set-upstream", "origin", branch],
             timeout: Self.networkOperationTimeout
         )
     }
@@ -2033,7 +2114,13 @@ struct GitClient: Sendable {
 
     func diff(for change: FileChange) throws -> String {
         if change.area == .staged {
-            return try run(["diff", "--cached", "--", change.path], allowedExitCodes: [0, 1])
+            // Passing both sides of a rename lets Git show it as a rename
+            // instead of a new file.
+            let paths = [change.previousPath, change.path].compactMap { $0 }
+            return try run(
+                ["diff", "--cached", "--no-ext-diff", "-M", "--"] + paths,
+                allowedExitCodes: [0, 1]
+            )
         }
 
         if change.status == "U" {
@@ -2041,12 +2128,12 @@ struct GitClient: Sendable {
                 return "This untracked directory is shown as one item. Stage it to inspect per-file diffs."
             }
             return try run(
-                ["diff", "--no-index", "--", "/dev/null", change.path],
+                ["diff", "--no-index", "--no-ext-diff", "--", "/dev/null", change.path],
                 allowedExitCodes: [0, 1]
             )
         }
 
-        return try run(["diff", "--", change.path], allowedExitCodes: [0, 1])
+        return try run(["diff", "--no-ext-diff", "--", change.path], allowedExitCodes: [0, 1])
     }
 
     func preview(for change: FileChange) throws -> GitFilePreview? {
@@ -2071,10 +2158,10 @@ struct GitClient: Sendable {
             oldContext = "HEAD"
             newContext = "Staged"
         } else {
-            let oldPath = change.previousPath ?? change.path
+            // The index already holds a staged rename under its new path.
             oldSource = change.status == "U"
                 ? nil
-                : .blob(object: ":\(oldPath)", path: oldPath)
+                : .blob(object: ":\(change.path)", path: change.path)
             newSource = change.status == "D"
                 ? nil
                 : workingTreePreviewSource(for: change.path)
@@ -2524,7 +2611,10 @@ struct GitClient: Sendable {
         let branch = components[1]
         _ = try run(["remote", "get-url", remote])
         _ = try run(["check-ref-format", "refs/heads/\(branch)"])
-        _ = try run(["push", remote, "--delete", branch])
+        _ = try run(
+            ["push", "--progress", remote, "--delete", branch],
+            timeout: Self.networkOperationTimeout
+        )
     }
 
     func createTag(
@@ -2551,13 +2641,19 @@ struct GitClient: Sendable {
         let tagName = try validatedTagName(name)
         let remoteName = try validatedExistingRemoteName(remote)
         _ = try run(["show-ref", "--verify", "refs/tags/\(tagName)"])
-        _ = try run(["push", remoteName, "refs/tags/\(tagName):refs/tags/\(tagName)"])
+        _ = try run(
+            ["push", "--progress", remoteName, "refs/tags/\(tagName):refs/tags/\(tagName)"],
+            timeout: Self.networkOperationTimeout
+        )
     }
 
     func deleteRemoteTag(name: String, remote: String) throws {
         let tagName = try validatedTagName(name)
         let remoteName = try validatedExistingRemoteName(remote)
-        _ = try run(["push", remoteName, ":refs/tags/\(tagName)"])
+        _ = try run(
+            ["push", "--progress", remoteName, ":refs/tags/\(tagName)"],
+            timeout: Self.networkOperationTimeout
+        )
     }
 
     func cherryPick(hash: String) throws {
@@ -3528,7 +3624,11 @@ struct GitClient: Sendable {
             "-e",
             query,
             "--"
-        ], allowedExitCodes: [0, 1])
+        ],
+            allowedExitCodes: [0, 1],
+            // Case folding needs a UTF-8 locale: under C, "øl" misses "Øl".
+            environmentOverrides: ["LC_ALL": "C.UTF-8"]
+        )
         let parsedTextMatches = RepositorySearchParser.textMatches(
             from: grepOutput,
             limit: max(0, textLimit)
@@ -3543,38 +3643,47 @@ struct GitClient: Sendable {
     }
 
     @discardableResult
-    private func run(
+    func run(
         _ arguments: [String],
         allowedExitCodes: Set<Int32> = [0],
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        environmentOverrides: [String: String] = [:]
     ) throws -> String {
         let process = Process()
         let outputPipe = Pipe()
+        // Warnings on stderr would otherwise land in front of parsed output,
+        // such as a permission warning before `git status`'s first record.
+        let errorPipe = Pipe()
 
         let gitArguments = Self.configuredGitArguments(arguments)
+        let inputPipe = Pipe()
+        var remoteScript: String?
         if let sshRepository {
             process.executableURL = SSHConnection.executableURL
-            process.arguments = SSHConnection.arguments(
-                host: sshRepository.host,
-                command: Self.remoteCommand(
-                    path: sshRepository.path,
-                    gitArguments: gitArguments
-                )
-            )
+            process.arguments = SSHConnection.shellArguments(host: sshRepository.host)
+            remoteScript = SSHConnection.scriptInput(Self.remoteCommand(
+                path: sshRepository.path,
+                gitArguments: gitArguments,
+                environmentOverrides: environmentOverrides
+            ))
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = gitArguments
             process.currentDirectoryURL = repositoryURL
         }
         process.environment = Self.commandEnvironment
-        process.standardInput = FileHandle.nullDevice
+            .merging(environmentOverrides) { $1 }
+        process.standardInput = remoteScript == nil ? FileHandle.nullDevice : inputPipe
         process.standardOutput = outputPipe
-        process.standardError = outputPipe
+        process.standardError = errorPipe
 
         let outputBuffer = GitCommandOutputBuffer()
+        let errorBuffer = GitCommandOutputBuffer()
         let outputHandle = outputPipe.fileHandleForReading
+        let errorHandle = errorPipe.fileHandleForReading
         let completion = DispatchSemaphore(value: 0)
         let outputCompletion = DispatchSemaphore(value: 0)
+        let errorCompletion = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in completion.signal() }
 
         do {
@@ -3592,18 +3701,32 @@ struct GitClient: Sendable {
         defer {
             KvistRuntimeMetrics.gitProcessFinished(processID: process.processIdentifier)
         }
+        if let remoteScript {
+            Self.write(Data(remoteScript.utf8), to: inputPipe)
+        }
         DispatchQueue.global(qos: .userInitiated).async {
-            outputBuffer.append(outputHandle.readDataToEndOfFile())
+            outputBuffer.drain(outputHandle)
             outputCompletion.signal()
         }
+        DispatchQueue.global(qos: .userInitiated).async {
+            errorBuffer.drain(errorHandle)
+            errorCompletion.signal()
+        }
 
-        let deadline = timeout.map { Date().addingTimeInterval($0) }
+        // The timeout counts time without output, so a slow but working
+        // fetch or clone of a large repository is not killed. Network
+        // commands pass --progress so Git keeps writing while it transfers.
+        func isStalled() -> Bool {
+            guard let timeout else { return false }
+            let lastActivity = max(outputBuffer.lastActivity, errorBuffer.lastActivity)
+            return Date().timeIntervalSince(lastActivity) >= timeout
+        }
         var wasCancelled = false
         var timedOut = false
         var terminationDeadline: Date?
         while completion.wait(timeout: .now() + .milliseconds(20)) == .timedOut {
-            if Task.isCancelled || deadline.map({ Date() >= $0 }) == true {
-                timedOut = !Task.isCancelled
+            if Task.isCancelled || timedOut || isStalled() {
+                timedOut = timedOut || !Task.isCancelled
                 wasCancelled = true
                 if terminationDeadline == nil {
                     process.terminate()
@@ -3614,30 +3737,61 @@ struct GitClient: Sendable {
             }
         }
         process.waitUntilExit()
-        if timedOut { try? outputHandle.close() }
-        outputCompletion.wait()
-        if !Task.isCancelled, deadline.map({ Date() >= $0 }) == true {
+        if wasCancelled {
+            // A helper Git started, such as ssh, can keep the pipes open
+            // after Git is killed. Stop waiting for the readers rather than
+            // closing the pipes under them.
+            _ = outputCompletion.wait(timeout: .now() + 2)
+            _ = errorCompletion.wait(timeout: .now() + 2)
+        } else {
+            outputCompletion.wait()
+            errorCompletion.wait()
+        }
+        if !wasCancelled, !Task.isCancelled, isStalled() {
             timedOut = true
         }
         if timedOut {
             let seconds = Int(timeout ?? 0)
             throw GitCommandError(
                 command: "git \(arguments.joined(separator: " "))",
-                output: "The Git operation timed out after \(seconds) seconds. Check the network or remote host and try again."
+                output: "The Git operation timed out after \(seconds) seconds without progress. Check the network or remote host and try again."
             )
         }
         if wasCancelled || Task.isCancelled {
             throw CancellationError()
         }
-        let output = String(data: outputBuffer.value(), encoding: .utf8) ?? ""
+        // Decoding with replacement keeps one non-UTF-8 byte, such as a
+        // Latin-1 file in a diff, from blanking the whole output.
+        let output = String(
+            decoding: remoteScript == nil
+                ? outputBuffer.value()
+                : SSHConnection.outputAfterMarker(outputBuffer.value()),
+            as: UTF8.self
+        )
 
         guard allowedExitCodes.contains(process.terminationStatus) else {
+            let errorOutput = Self.finalProgressText(
+                String(decoding: errorBuffer.value(), as: UTF8.self)
+            )
             throw GitCommandError(
                 command: "git \(arguments.joined(separator: " "))",
-                output: output
+                output: [output, errorOutput]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: output.hasSuffix("\n") ? "" : "\n")
             )
         }
         return output
+    }
+
+    /// Git redraws progress lines with carriage returns. Keep what a terminal
+    /// would finally show on each line, so errors do not repeat every
+    /// "Receiving objects" update.
+    static func finalProgressText(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                line.split(separator: "\r", omittingEmptySubsequences: true).last.map(String.init) ?? ""
+            }
+            .joined(separator: "\n")
     }
 
     private static func configuredGitArguments(_ arguments: [String]) -> [String] {
@@ -3646,7 +3800,14 @@ struct GitClient: Sendable {
             // Kvist owns refresh scheduling, so a command-triggered detached
             // maintenance process only adds contention and self-watcher events.
             "-c", "maintenance.auto=false",
-            "-c", "gc.auto=0"
+            "-c", "gc.auto=0",
+            // Kvist parses this output, so user settings that change its
+            // shape are pinned to Git's defaults.
+            "-c", "color.ui=false",
+            "-c", "log.showSignature=false",
+            "-c", "diff.noprefix=false",
+            "-c", "diff.mnemonicPrefix=false",
+            "-c", "core.precomposeUnicode=true"
         ] + arguments
     }
 
@@ -3654,22 +3815,26 @@ struct GitClient: Sendable {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private static func remoteCommand(path: String, gitArguments: [String]) -> String {
+    private static func remoteCommand(
+        path: String,
+        gitArguments: [String],
+        environmentOverrides: [String: String] = [:]
+    ) -> String {
         ([
             "env",
             "LC_ALL=C",
             "LANG=C",
             "GIT_OPTIONAL_LOCKS=0",
+            "GIT_LITERAL_PATHSPECS=1",
             "GIT_TERMINAL_PROMPT=0",
             "GCM_INTERACTIVE=Never",
             "GIT_EDITOR=true",
             "GIT_SEQUENCE_EDITOR=true",
             "GIT_MERGE_AUTOEDIT=no",
-            "GIT_PAGER=cat",
-            "git",
-            "-C",
-            path
-        ] + gitArguments)
+            "GIT_PAGER=cat"
+        ] + environmentOverrides.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+            + ["git", "-C", path]
+            + gitArguments)
             .map(shellQuote)
             .joined(separator: " ")
     }
@@ -3786,49 +3951,39 @@ struct GitClient: Sendable {
     }
 
     static func runSSH(host: String, command: String) throws -> Data {
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.executableURL = SSHConnection.executableURL
-        process.arguments = SSHConnection.arguments(
-            host: host,
-            command: command
+        let result = try runHelper(
+            SSHConnection.executableURL,
+            arguments: SSHConnection.shellArguments(host: host),
+            input: Data(SSHConnection.scriptInput(command).utf8)
         )
-        process.environment = Self.commandEnvironment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        try process.run()
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let error = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        try Task.checkCancellation()
-        guard process.terminationStatus == 0 else {
+        guard result.status == 0 else {
             throw GitCommandError(
                 command: "ssh",
-                output: String(data: error, encoding: .utf8) ?? ""
+                output: String(decoding: result.error, as: UTF8.self)
             )
         }
-        return output
+        return SSHConnection.outputAfterMarker(result.output)
+    }
+
+    /// Writes a helper's standard input off the calling thread, so a child
+    /// that exits early or never reads cannot block the caller.
+    private static func write(_ data: Data, to pipe: Pipe) {
+        let handle = pipe.fileHandleForWriting
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        }
     }
 
     private func runRsync(_ arguments: [String]) throws {
-        let process = Process()
-        let outputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-        process.arguments = arguments
-        process.environment = Self.commandEnvironment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-        try process.run()
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        try Task.checkCancellation()
-        guard process.terminationStatus == 0 else {
+        let result = try Self.runHelper(
+            URL(fileURLWithPath: "/usr/bin/rsync"),
+            arguments: arguments
+        )
+        guard result.status == 0 else {
             throw GitCommandError(
                 command: "rsync",
-                output: String(data: output, encoding: .utf8) ?? ""
+                output: String(decoding: result.output + result.error, as: UTF8.self)
             )
         }
     }
@@ -3847,22 +4002,22 @@ struct GitClient: Sendable {
         defer { try? outputHandle.close() }
 
         let gitArguments = Self.configuredGitArguments(["cat-file", "blob", object])
+        let inputPipe = Pipe()
+        var remoteScript: String?
         if let sshRepository {
             process.executableURL = SSHConnection.executableURL
-            process.arguments = SSHConnection.arguments(
-                host: sshRepository.host,
-                command: Self.remoteCommand(
-                    path: sshRepository.path,
-                    gitArguments: gitArguments
-                )
-            )
+            process.arguments = SSHConnection.shellArguments(host: sshRepository.host)
+            remoteScript = SSHConnection.scriptInput(Self.remoteCommand(
+                path: sshRepository.path,
+                gitArguments: gitArguments
+            ))
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = gitArguments
             process.currentDirectoryURL = repositoryURL
         }
         process.environment = Self.commandEnvironment
-        process.standardInput = FileHandle.nullDevice
+        process.standardInput = remoteScript == nil ? FileHandle.nullDevice : inputPipe
         process.standardOutput = outputHandle
         process.standardError = errorPipe
 
@@ -3888,6 +4043,9 @@ struct GitClient: Sendable {
         defer {
             KvistRuntimeMetrics.gitProcessFinished(processID: process.processIdentifier)
         }
+        if let remoteScript {
+            Self.write(Data(remoteScript.utf8), to: inputPipe)
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             errorBuffer.append(errorHandle.readDataToEndOfFile())
             errorCompletion.signal()
@@ -3908,13 +4066,27 @@ struct GitClient: Sendable {
         }
 
         guard process.terminationStatus == 0 else {
-            let errorOutput = String(data: errorBuffer.value(), encoding: .utf8) ?? ""
+            let errorOutput = String(decoding: errorBuffer.value(), as: UTF8.self)
             try? FileManager.default.removeItem(at: outputURL)
             throw GitCommandError(
                 command: "git cat-file blob",
                 output: errorOutput
             )
         }
+        if remoteScript != nil {
+            try Self.removeLoginBanner(from: outputURL)
+        }
+    }
+
+    /// A login greeting lands in the file ahead of the blob. It can only sit
+    /// at the start, so the marker is looked for in the first 64 KB.
+    private static func removeLoginBanner(from fileURL: URL) throws {
+        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        let marker = Data(SSHConnection.outputMarker.utf8)
+        guard let range = data.range(of: marker, in: 0..<min(data.count, 65_536)) else {
+            return
+        }
+        try data[range.upperBound...].write(to: fileURL, options: .atomic)
     }
 
 }

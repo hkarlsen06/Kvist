@@ -402,6 +402,46 @@ enum RepositoryFileLoader {
         return text
     }
 
+    /// Encodes edited text the way the file on disk is stored: same Unicode
+    /// form, byte order mark, and line endings. Without this, saving a UTF-16
+    /// or Latin-1 file would silently convert it to UTF-8, and a new line in
+    /// a CRLF file would be a lone LF. Returns nil when the text has
+    /// characters the file's encoding cannot store.
+    static func encode(_ text: String, matching existing: Data?) -> Data? {
+        guard let existing else { return text.data(using: .utf8) }
+        var text = text
+        if let existingText = decodeText(existing, allowsLegacyEncoding: true),
+           usesOnlyCRLF(existingText) {
+            text = text.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\n", with: "\r\n")
+        }
+        let boms: [([UInt8], String.Encoding)] = [
+            ([0xEF, 0xBB, 0xBF], .utf8),
+            ([0xFF, 0xFE, 0x00, 0x00], .utf32LittleEndian),
+            ([0x00, 0x00, 0xFE, 0xFF], .utf32BigEndian),
+            ([0xFF, 0xFE], .utf16LittleEndian),
+            ([0xFE, 0xFF], .utf16BigEndian)
+        ]
+        if let (bom, encoding) = boms.first(where: { existing.starts(with: $0.0) }) {
+            return text.data(using: encoding).map { Data(bom) + $0 }
+        }
+        // Files that are not valid UTF-8 opened through the Latin-1 fallback.
+        if String(data: existing, encoding: .utf8) == nil {
+            return text.data(using: .isoLatin1)
+        }
+        return text.data(using: .utf8)
+    }
+
+    private static func usesOnlyCRLF(_ text: String) -> Bool {
+        let utf16 = Array(text.utf16)
+        var lineFeeds = 0
+        for index in utf16.indices where utf16[index] == 0x0A {
+            guard index > 0, utf16[index - 1] == 0x0D else { return false }
+            lineFeeds += 1
+        }
+        return lineFeeds > 0
+    }
+
     private static func decodeText(
         _ data: Data,
         allowsLegacyEncoding: Bool

@@ -41,6 +41,19 @@ KVIST_NOTARY_PROFILE="kvist-notary" \
 Scripts/release.sh
 ```
 
+## Publish the release
+
+Bump `CFBundleShortVersionString` and `CFBundleVersion` in
+`Resources/Info.plist` before running `Scripts/release.sh`. Then publish both
+artifacts on GitHub under a `macos/<version>` tag:
+
+```sh
+gh release create "macos/0.3.2" dist/Kvist.zip dist/Kvist.dmg \
+  --title "Kvist 0.3.2" --notes-file notes.md
+```
+
+Installed copies find the release through the conditions below.
+
 ## In-app updates
 
 Kvist checks the GitHub releases of `hkarlsen06/Kvist` and offers the newest

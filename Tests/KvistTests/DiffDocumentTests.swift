@@ -28,6 +28,24 @@ final class DiffDocumentTests: XCTestCase {
         )
     }
 
+    func testFormatterSplitsCRLFLinesAndKeepsRemovedDashLinesInHunks() throws {
+        let diff = "diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n"
+            + "@@ -1,2 +1,2 @@\n--- drop table\r\n+++ keep\r\n same"
+
+        let formatted = try XCTUnwrap(DiffDocumentFormatter.formattedText(for: diff))
+
+        XCTAssertEqual(
+            formatted,
+            "\t\t\t▏\tdiff --git a/q.sql b/q.sql\n"
+                + "\t\t\t▏\t--- a/q.sql\n"
+                + "\t\t\t▏\t+++ b/q.sql\n"
+                + "\t\t\t▏\t@@ -1,2 +1,2 @@\n"
+                + "\t1\t\t▏\t--- drop table\n"
+                + "\t\t1\t▏\t+++ keep\n"
+                + "\t2\t2\t▏\t same\n"
+        )
+    }
+
     func testLineComparerHighlightsOnlyTheChangedWhitespaceAndWords() {
         let spacing = DiffLineComparer.changedRanges(
             removed: "let value  = compute(a, b)",

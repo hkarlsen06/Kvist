@@ -9,18 +9,14 @@ final class AICommitMessagePreferencesTests: XCTestCase {
             path: "/srv/project with spaces"
         )
 
-        let arguments = AICommitMessageGenerator.sshArguments(
+        let arguments = SSHConnection.shellArguments(host: repository.host)
+        let script = AICommitMessageGenerator.remoteShellScript(
             for: repository,
             command: "codex exec"
         )
 
-        XCTAssertEqual(
-            arguments,
-            SSHConnection.options + [
-                "--", "deploy@example.com",
-                "cd '/srv/project with spaces' && codex exec"
-            ]
-        )
+        XCTAssertEqual(arguments, SSHConnection.options + ["--", "deploy@example.com", "/bin/sh"])
+        XCTAssertEqual(script, "cd '/srv/project with spaces' && codex exec")
         XCTAssertTrue(arguments.contains("ControlMaster=auto"))
         XCTAssertTrue(arguments.contains("ControlPersist=120"))
     }
@@ -28,13 +24,11 @@ final class AICommitMessagePreferencesTests: XCTestCase {
     func testAICommitMessageSSHCommandRunsInALoginShell() throws {
         let repository = try SSHRepository(host: "deploy@example.com", path: "/srv/app")
 
-        let command = try XCTUnwrap(
-            AICommitMessageGenerator.sshArguments(
+        let command = AICommitMessageGenerator.remoteShellScript(
                 for: repository,
                 command: "claude --print",
                 inLoginShell: true
-            ).last
-        )
+            )
 
         XCTAssertTrue(command.hasPrefix("cd '/srv/app' && "))
         XCTAssertTrue(command.contains("-l -c 'claude --print'"))
@@ -62,16 +56,14 @@ final class AICommitMessagePreferencesTests: XCTestCase {
         )
 
         let repository = try SSHRepository(host: "example.com", path: home.path)
-        let remoteCommand = try XCTUnwrap(
-            AICommitMessageGenerator.sshArguments(
+        let remoteCommand = AICommitMessageGenerator.remoteShellScript(
                 for: repository,
                 command: """
                 \(AICommitMessageGenerator.remotePathPreamble)
                 command -v claude
                 """,
                 inLoginShell: true
-            ).last
-        )
+            )
 
         let result = try AICommandRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
@@ -120,12 +112,10 @@ final class AICommitMessagePreferencesTests: XCTestCase {
                 logPath: "\(directory)/command.log"
             )
             let repository = try SSHRepository(host: "example.com", path: home.path)
-            let remoteCommand = try XCTUnwrap(
-                AICommitMessageGenerator.sshArguments(
-                    for: repository,
-                    command: script,
-                    inLoginShell: true
-                ).last
+            let remoteCommand = AICommitMessageGenerator.remoteShellScript(
+                for: repository,
+                command: script,
+                inLoginShell: true
             )
             return try AICommandRunner.run(
                 executable: URL(fileURLWithPath: "/usr/bin/env"),
@@ -190,6 +180,38 @@ final class AICommitMessagePreferencesTests: XCTestCase {
         XCTAssertEqual(configuration.model, "claude-opus-4-6")
         XCTAssertNil(configuration.reasoningEffort)
         XCTAssertEqual(configuration.commandTemplate, "custom {model}")
+    }
+
+    func testCodexDefaultsToAutomaticModelAtLowEffort() throws {
+        let suiteName = "KvistTests.AIDefaults.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertNil(AICommitMessageConfiguration.load(defaults: defaults).model)
+
+        // The model Kvist used to store as its default now follows the latest Luna.
+        defaults.set("gpt-6-luna", forKey: AICommitMessagePreferences.codexModelKey)
+        let configuration = AICommitMessageConfiguration.load(defaults: defaults)
+
+        XCTAssertEqual(configuration.provider, .codex)
+        XCTAssertNil(configuration.model)
+        XCTAssertEqual(configuration.reasoningEffort, .low)
+    }
+
+    func testAutomaticModelPicksHighestPriorityLuna() {
+        let catalog = [
+            AICommitMessageModel(id: "gpt-7-sol", name: "Sol"),
+            AICommitMessageModel(id: "gpt-7-luna", name: "Luna"),
+            AICommitMessageModel(id: "gpt-6-luna", name: "Old Luna")
+        ]
+
+        XCTAssertEqual(AICommitMessageProvider.codex.automaticModel(in: catalog), "gpt-7-luna")
+        XCTAssertEqual(
+            AICommitMessageProvider.codex.automaticModel(in: Array(catalog.prefix(1))),
+            "gpt-7-sol"
+        )
+        XCTAssertNil(AICommitMessageProvider.codex.automaticModel(in: []))
+        XCTAssertEqual(AICommitMessageProvider.claude.automaticModel(in: []), "sonnet")
     }
 
     func testCodexConfigurationLoadsReasoningEffortAndMigratesLegacyDefault() throws {

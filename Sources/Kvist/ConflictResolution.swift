@@ -114,7 +114,7 @@ struct ConflictDocument: Equatable, Sendable {
 
         while index < lines.count {
             let line = lines[index]
-            guard line.hasPrefix("<<<<<<<") else {
+            guard isMarker(line, "<<<<<<<") else {
                 plain += line
                 index += 1
                 continue
@@ -146,6 +146,15 @@ struct ConflictDocument: Equatable, Sendable {
         }
     }
 
+    /// Git writes a marker as exactly seven characters followed by a space
+    /// and label, or by the end of the line. A longer run, such as a Markdown
+    /// `==========` heading underline, is file content.
+    static func isMarker(_ line: String, _ marker: String) -> Bool {
+        guard line.hasPrefix(marker) else { return false }
+        guard let next = line.dropFirst(marker.count).first else { return true }
+        return next == " " || next == "\n" || next == "\r\n" || next == "\r"
+    }
+
     private static func parseHunk(
         lines: [String],
         startIndex: Int,
@@ -158,24 +167,24 @@ struct ConflictDocument: Equatable, Sendable {
         var ancestorMarkerLine: Int?
 
         while index < lines.count,
-              !lines[index].hasPrefix("|||||||"),
-              !lines[index].hasPrefix("=======") {
+              !isMarker(lines[index], "|||||||"),
+              !isMarker(lines[index], "=======") {
             current += lines[index]
             index += 1
         }
 
-        if index < lines.count, lines[index].hasPrefix("|||||||") {
+        if index < lines.count, isMarker(lines[index], "|||||||") {
             ancestorMarkerLine = index + 1
             index += 1
-            while index < lines.count, !lines[index].hasPrefix("=======") {
+            while index < lines.count, !isMarker(lines[index], "=======") {
                 index += 1
             }
         }
 
-        guard index < lines.count, lines[index].hasPrefix("=======") else { return nil }
+        guard index < lines.count, isMarker(lines[index], "=======") else { return nil }
         let separatorIndex = index
         index += 1
-        while index < lines.count, !lines[index].hasPrefix(">>>>>>>") {
+        while index < lines.count, !isMarker(lines[index], ">>>>>>>") {
             incoming += lines[index]
             index += 1
         }

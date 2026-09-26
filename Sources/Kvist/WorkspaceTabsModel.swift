@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -15,6 +16,10 @@ final class RepositoryTab: ObservableObject, Identifiable {
     @Published private(set) var hasChanges = false
     @Published private(set) var isSSH = false
     @Published private(set) var isRepositoryLoadPending: Bool
+    /// The tab's folder was not found when it was shown, for example on a
+    /// drive that is not connected. The tab and any recovered draft stay
+    /// until the folder returns or the user closes the tab.
+    @Published private(set) var isFolderMissing = false
 
     init(
         id: UUID = UUID(),
@@ -42,6 +47,29 @@ final class RepositoryTab: ObservableObject, Identifiable {
 
     var loadedModel: RepositoryModel? {
         storedModel
+    }
+
+    var hasRecoveredDraft: Bool {
+        pendingRestorationState?.editor?.isDirty == true
+    }
+
+    /// Asks before closing a tab with unsaved edits. A restored tab that was
+    /// never shown keeps its recovered draft only in the restoration state.
+    fileprivate func confirmDiscardChanges() -> Bool {
+        // The model exists as soon as the tab is shown, but the recovered
+        // draft stays pending until the repository finishes loading.
+        guard let editor = pendingRestorationState?.editor, editor.isDirty else {
+            return storedModel?.confirmDiscardRepositoryFileChanges() ?? true
+        }
+        let result = AppDialog.run(
+            title: "Discard Recovered Changes?",
+            message: "\(editor.title) has unsaved changes recovered from the last session. Open the tab to review or save them.",
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(title: "Discard Changes", role: .destructive)
+            ]
+        )
+        return result.actionIndex == 1
     }
 
     var repositoryURL: URL? {
@@ -81,6 +109,11 @@ final class RepositoryTab: ObservableObject, Identifiable {
             isRepositoryLoadPending = false
             return
         }
+        isFolderMissing = !FileManager.default.fileExists(atPath: repositoryURL.path)
+        guard !isFolderMissing else {
+            isRepositoryLoadPending = false
+            return
+        }
         isRepositoryLoadPending = true
         let generation = UUID()
         activationGeneration = generation
@@ -102,12 +135,14 @@ final class RepositoryTab: ObservableObject, Identifiable {
         }
     }
 
-    fileprivate func deactivate() {
+    /// Closing a tab also stops a running clone or SSH connection. Switching
+    /// away leaves them running so they finish in the background.
+    fileprivate func deactivate(isClosing: Bool = false) {
         guard let model = storedModel else { return }
         activationGeneration = UUID()
         activationTask?.cancel()
         activationTask = nil
-        model.cancelRepositoryOpen()
+        model.cancelRepositoryOpen(includingCloneAndConnection: isClosing)
         model.setMonitoringEnabled(false)
         isRepositoryLoadPending = model.repositoryURL == nil
             && model.repositoryInitializationURL == nil
@@ -202,8 +237,9 @@ final class WorkspaceTabsModel: ObservableObject {
             0,
             monitoringActivationDelayMilliseconds
         )
-        recentRepositoryPaths = (defaults.stringArray(forKey: recentRepositoriesKey) ?? [])
-            .filter { FileManager.default.fileExists(atPath: $0) }
+        // Keep entries whose folder is missing, such as on an unmounted
+        // volume. recentRepositoryURLs hides them until the folder returns.
+        recentRepositoryPaths = defaults.stringArray(forKey: recentRepositoriesKey) ?? []
 
         let restoredWorkspace = restoreSavedTabs
             ? defaults.data(forKey: restoredWorkspaceKey).flatMap {
@@ -225,12 +261,11 @@ final class WorkspaceTabsModel: ObservableObject {
         }
 
         var seen = Set<String>()
+        // Tabs whose folder is missing stay; the tab shows that the folder
+        // is not available instead of silently dropping it and its draft.
         let repositoryURLs = savedPaths.compactMap { path -> URL? in
             let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-            guard seen.insert(standardizedPath).inserted,
-                  FileManager.default.fileExists(atPath: standardizedPath) else {
-                return nil
-            }
+            guard seen.insert(standardizedPath).inserted else { return nil }
             return URL(fileURLWithPath: standardizedPath, isDirectory: true)
         }
 
@@ -239,10 +274,7 @@ final class WorkspaceTabsModel: ObservableObject {
                 return RepositoryTab(id: saved.id, restorationState: saved.state)
             }
             let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-            guard seen.insert(standardizedPath).inserted,
-                  FileManager.default.fileExists(atPath: standardizedPath) else {
-                return nil
-            }
+            guard seen.insert(standardizedPath).inserted else { return nil }
             return RepositoryTab(
                 id: saved.id,
                 repositoryURL: URL(fileURLWithPath: standardizedPath, isDirectory: true),
@@ -361,6 +393,13 @@ final class WorkspaceTabsModel: ObservableObject {
         tabs.count { $0.loadedModel?.hasOutstandingRepositoryTasks == true }
     }
 
+    /// Opens the active tab again if its folder was missing, such as after
+    /// the user connects the drive it lives on.
+    func retryMissingActiveTab() {
+        guard activeTab.isFolderMissing else { return }
+        activeTab.activate()
+    }
+
     func addTab() {
         let tab = RepositoryTab()
         tabs.append(tab)
@@ -404,10 +443,11 @@ final class WorkspaceTabsModel: ObservableObject {
 
     func close(_ tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        guard tabs[index].model.confirmDiscardRepositoryFileChanges() else { return }
-        tabs[index].deactivate()
+        guard tabs[index].confirmDiscardChanges() else { return }
+        tabs[index].deactivate(isClosing: true)
         repositorySubscriptions[tabID] = nil
-        tabs.remove(at: index)
+        let closedTab = tabs.remove(at: index)
+        removeSSHDownloads(of: [closedTab])
 
         if tabs.isEmpty {
             let replacement = RepositoryTab()
@@ -424,25 +464,80 @@ final class WorkspaceTabsModel: ObservableObject {
     func closeOthers(_ tabID: UUID) {
         guard let keptTab = tabs.first(where: { $0.id == tabID }) else { return }
         guard tabs.filter({ $0.id != tabID }).allSatisfy({
-            $0.model.confirmDiscardRepositoryFileChanges()
+            $0.confirmDiscardChanges()
         }) else { return }
-        for tab in tabs where tab.id != tabID {
-            tab.deactivate()
+        let closedTabs = tabs.filter { $0.id != tabID }
+        for tab in closedTabs {
+            tab.deactivate(isClosing: true)
             repositorySubscriptions[tab.id] = nil
         }
         tabs = [keptTab]
+        removeSSHDownloads(of: closedTabs)
         if activeTabID != keptTab.id {
             activeTabID = keptTab.id
         }
         persistTabs()
     }
 
+    var isShowingOnlyEmptyTab: Bool {
+        tabs.count == 1 && activeTab.repositoryPath == nil
+    }
+
+    /// ⌘W closes the active repository tab, or the window once only the
+    /// empty welcome tab is left, as in other tabbed Mac apps.
+    func closeActiveTabOrWindow() {
+        if isShowingOnlyEmptyTab {
+            NSApp.keyWindow?.performClose(nil)
+        } else {
+            close(activeTabID)
+        }
+    }
+
+    var hasRunningOperations: Bool {
+        tabs.contains { tab in
+            guard let model = tab.loadedModel else { return false }
+            return model.isBusy
+                || model.isSavingRepositoryFile
+                || model.isGeneratingCommitMessage
+                || model.hasPendingChangeOperations
+        }
+    }
+
+    /// Saves the workspace for restoration, or asks about unsaved files when
+    /// restoration is off. Returns false when the user cancels quitting.
+    func prepareToQuit() -> Bool {
+        if defaults.object(forKey: "restoreWorkspaceOnLaunch") == nil
+            || defaults.bool(forKey: "restoreWorkspaceOnLaunch") {
+            prepareForTermination()
+            return true
+        }
+        return confirmDiscardAllRepositoryFileChanges()
+    }
+
+    /// A closed SSH tab's downloaded files are a cache nothing else needs,
+    /// unless another tab shows the same remote location.
+    private func removeSSHDownloads(of closedTabs: [RepositoryTab]) {
+        let openPaths = Set(tabs.compactMap(\.repositoryPath))
+        for path in closedTabs.compactMap(\.repositoryPath) where !openPaths.contains(path) {
+            SSHMirrorStore.removeDownloads(at: URL(fileURLWithPath: path, isDirectory: true))
+        }
+    }
+
+    /// Clears mirrors that no open tab uses. Run once at launch.
+    func removeUnusedSSHMirrors() {
+        let openPaths = Set(tabs.compactMap(\.repositoryPath))
+        let recentPaths = Set(recentRepositoryPaths)
+        DispatchQueue.global(qos: .utility).async {
+            SSHMirrorStore.removeUnused(keepingOpen: openPaths, recent: recentPaths)
+        }
+    }
+
     var hasUnsavedRepositoryFileChanges: Bool {
-        tabs.contains { $0.model.hasUnsavedRepositoryFileChanges }
+        tabs.contains { $0.loadedModel?.hasUnsavedRepositoryFileChanges == true }
     }
 
     func confirmDiscardAllRepositoryFileChanges() -> Bool {
-        tabs.allSatisfy { $0.model.confirmDiscardRepositoryFileChanges() }
+        tabs.allSatisfy { $0.confirmDiscardChanges() }
     }
 
     var recentRepositoryURLs: [URL] {

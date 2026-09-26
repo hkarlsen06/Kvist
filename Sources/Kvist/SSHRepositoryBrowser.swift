@@ -41,7 +41,7 @@ enum SSHBrowserRemote {
         set -- "$d"
         \(kindProbe)
         printf '%s\\0.\\0' "$t"
-        find "$d" -mindepth 1 -maxdepth 1 \(hiddenFilter)-exec sh -c '\
+        find -H "$d" -mindepth 1 -maxdepth 1 \(hiddenFilter)-exec sh -c '\
         for item do \
         [ -d "$item" ] || continue; \
         set -- "$item"; \
@@ -58,7 +58,7 @@ enum SSHBrowserRemote {
     /// failing the whole sweep.
     static var suggestionsCommand: String {
         posixShellCommand("""
-        find "$HOME" -mindepth 1 -maxdepth 4 \
+        find -H "$HOME" -mindepth 1 -maxdepth 4 \
         \\( -name '.?*' ! -name .git -prune \\) -o -name .git -prune -print \
         2>/dev/null | head -n 40
         exit 0
@@ -493,7 +493,7 @@ struct SSHRepositoryBrowserView: View {
                     .font(AppType.caption)
                     .foregroundStyle(AppTheme.muted)
             case .bareRepository:
-                Text("bare — no working tree")
+                Text("bare, no working tree")
                     .font(AppType.caption)
                     .foregroundStyle(AppTheme.muted)
                     .help("Kvist needs a repository with a working tree")

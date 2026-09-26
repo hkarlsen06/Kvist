@@ -918,6 +918,27 @@ final class CommitBackendTests: XCTestCase {
         }
     }
 
+    func testTimeoutCountsOnlyTimeWithoutOutput() throws {
+        let client = GitClient(repositoryURL: repositoryURL)
+        let chatty = "alias.chatty=!for i in 1 2 3 4; do echo working >&2; sleep 0.4; done"
+        XCTAssertNoThrow(try client.run(["-c", chatty, "chatty"], timeout: 1))
+
+        let silent = "alias.silent=!sleep 3"
+        XCTAssertThrowsError(try client.run(["-c", silent, "silent"], timeout: 1)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("timed out"))
+        }
+    }
+
+    func testProgressLinesKeepOnlyTheirFinalState() {
+        XCTAssertEqual(
+            GitClient.finalProgressText(
+                "Receiving objects:  10% (1/10)\rReceiving objects: 100% (10/10), done.\n"
+                    + "fatal: unable to access remote\n"
+            ),
+            "Receiving objects: 100% (10/10), done.\nfatal: unable to access remote\n"
+        )
+    }
+
     func testCloneRepositoryUsesSafeDestinationAndReturnsRoot() throws {
         try commitFile(path: "README.md", contents: "# Clone me\n", message: "Initial")
         let cloneURL = FileManager.default.temporaryDirectory

@@ -8,28 +8,29 @@ browser and editor for any folder on a remote machine over SSH.
 - Open, clone, or initialize a Git repository, reopen it from the recents list, or drop a folder on the welcome screen
 - Open a repository or any folder over SSH: Git repositories get the full workspace, other folders open as a remote file browser and editor with no Git required, and either can be initialized as a repository later
 - Browse a local folder without Git, then initialize it from the Files view when you are ready
-- Keep multiple repositories open in compact title-bar tabs (`⌘T` / `⌘W`, cycle with `⇧⌘[` / `⇧⌘]`)
+- Keep multiple repositories open in compact title-bar tabs (`⌘T` / `⌘W`, cycle with `⇧⌘[` / `⇧⌘]` or `⌥Tab` / `⌥⇧Tab`), and drag tabs to reorder them
 - Recover open tabs, the selected workspace, expanded folders, commit text, and unsaved editor drafts after reopening Kvist
-- Switch between Git and Files modes
+- Switch between Git and Files modes (`⌘1` / `⌘2`, or `⌃Tab` to toggle)
 - Edit text files in a native source editor with `⌘S` saving, and preview other file types with macOS Quick Look
 - Create, rename, delete, and check out local or remote-tracking branches
 - View staged, modified, deleted, renamed, and untracked files
 - Stage or unstage one file or all files, stash changes, or discard all changes with confirmation
 - Inspect working-tree and staged diffs with character-level highlights for the changed parts of a line
 - Commit with `⌘Return`
-- Refresh automatically when the worktree, index, refs, or HEAD changes
+- Refresh automatically when the worktree, index, refs, or HEAD changes, or refresh by hand with `⌘R`
 - Resize the graph vertically and the Git/diff split horizontally with their dividers
 - Expand commits inline to inspect their changed files
 - Open working-tree and historical diffs in a temporary editor-style side panel (`⎋` closes it)
 - Use focused graph actions for integration, cherry-pick, revert, reset, tags, and recovery
-- Generate a structured commit subject with Codex or Claude, choose the model and Codex reasoning effort, and inspect or customize the exact CLI command
+- Generate a structured commit subject with Codex or Claude, locally or on the remote machine for SSH repositories, use the latest GPT Luna or Sonnet model by default or pick a model and Codex reasoning effort, and inspect or customize the exact CLI command
 - Fetch, pull using Git's configured strategy, push, or sync with rebase
 - Browse a parent-based, vector-rendered Git history graph
 - Include reflog-reachable commits in the graph for recovery
 - Manage remotes, upstream branches, remote tags, and paused Git operations
 - Keep scrolling to load older commits automatically
 - Inspect commit metadata and changed-file statistics
-- Open Preferences from the app menu, use the default Ayu Dark theme and Material icons, or import licensed editor themes from Eclipse Open VSX
+- Open Settings from the app menu, use the default Ayu Dark theme and Material icons, import licensed editor themes and icon packs from Eclipse Open VSX, or import a local theme JSON or VSIX file
+- Install signed updates from GitHub releases with Check for Updates, or let Kvist check once a day
 
 Before downloading an Open VSX result, Kvist verifies that it is categorized as a theme, is downloadable, and declares a license. Imported themes remain subject to their publisher's license.
 
@@ -65,7 +66,7 @@ workload.
 Commit-message generation uses the Codex or Claude CLI already installed and
 authenticated on the Mac. Codex can also use the binary bundled with the ChatGPT
 app. Install and sign in to the selected provider's CLI before generating a
-message. Preferences loads Codex's current model catalog and supported reasoning
+message. Settings loads Codex's current model catalog and supported reasoning
 efforts from the CLI; Claude's
 stable aliases are shown because Claude Code does not expose a model-list command.
 Exact model IDs remain editable for both providers.

@@ -155,6 +155,8 @@ final class RepositoryModel: ObservableObject {
         set { commitMessageState.text = newValue }
     }
     @Published var selectedChange: FileChange?
+    @Published var isStagedSectionExpanded = true
+    @Published var isUnstagedSectionExpanded = true
     @Published var selectedCommit: CommitInfo?
     @Published var selectedCommitFile: CommitFileChange?
     @Published private(set) var detailText = ""
@@ -222,6 +224,11 @@ final class RepositoryModel: ObservableObject {
     private let persistsLastRepository: Bool
     private let graphPageSize: Int
     private var detailRequestID = UUID()
+    private var quietDiffRefreshID = UUID()
+
+    /// Identifies what the detail panel shows. A quiet refresh of the same
+    /// diff keeps the ID, so the view keeps its scroll position.
+    var detailDocumentID: UUID { detailRequestID }
     private var graphLimit: Int
     private var graphHistoryOffset = 0
     private var graphHasMore = false
@@ -256,7 +263,11 @@ final class RepositoryModel: ObservableObject {
     private var isRefreshInProgress = false
     private var syncActivityDepth = 0
     private var pendingLiveRefresh = false
+    private var commitMessageGenerationTask: Task<String, Error>?
     private var pendingWorkingTreeRefresh = false
+    /// A refresh was scheduled or running when monitoring stopped for a tab
+    /// switch. It runs again when the tab is shown.
+    private var needsRefreshWhenMonitoringResumes = false
     private var repositoryMetadataPaths: [String] = []
     private var workingTreeVersion = 0
     private let mutationQueue = RepositoryMutationQueue()
@@ -307,8 +318,12 @@ final class RepositoryModel: ObservableObject {
     }
 
     func makeRestorationState() -> RepositoryRestorationState {
+        // Only unsaved drafts need their text saved; clean files reload from
+        // disk. While a file loads, the text still belongs to the previous one.
         let activeEditor = selectedRepositoryFilePath.map {
-            let retainsText = detailKind != .largeSource
+            let retainsText = detailKind == .source
+                && !isDetailLoading
+                && repositoryFileText != savedRepositoryFileText
             return RepositoryEditorRestorationState(
                 path: $0,
                 title: detailTitle,
@@ -323,7 +338,7 @@ final class RepositoryModel: ObservableObject {
             )
         }
         let rememberedEditor = repositoryFileSession.map {
-            let retainsText = $0.kind != .largeSource
+            let retainsText = $0.kind == .source && $0.fileText != $0.savedFileText
             return RepositoryEditorRestorationState(
                 path: $0.path,
                 title: $0.title,
@@ -513,7 +528,17 @@ final class RepositoryModel: ObservableObject {
                 startWatching(paths: repositoryWatchPaths)
             }
             startAutoFetching()
+            if needsRefreshWhenMonitoringResumes {
+                needsRefreshWhenMonitoringResumes = false
+                scheduleLiveRefresh()
+            }
         } else {
+            needsRefreshWhenMonitoringResumes = pendingLiveRefresh
+                || pendingWorkingTreeRefresh
+                || liveRefreshTask != nil
+                || workingTreeRefreshTask != nil
+                || repositorySnapshotLoadTask != nil
+                || workingTreeSnapshotLoadTask != nil
             autoFetchTask?.cancel()
             autoFetchTask = nil
             liveRefreshTask?.cancel()
@@ -653,9 +678,7 @@ final class RepositoryModel: ObservableObject {
     }
 
     func openRepository(_ url: URL, asPlainFolder: Bool = false) async {
-        let marker = url.appendingPathComponent(".kvist-ssh")
-        if let data = try? Data(contentsOf: marker),
-           let sshRepository = try? JSONDecoder().decode(SSHRepository.self, from: data) {
+        if let sshRepository = SSHRepository.mirrored(at: url) {
             await openRepository(url, overSSH: sshRepository)
             return
         }
@@ -699,12 +722,15 @@ final class RepositoryModel: ObservableObject {
                     probeTask.cancel()
                 }
             } catch {
+                // After a cancel, another operation may already own isBusy.
+                guard sshProbeTask == probeTask else { return }
                 sshProbeTask = nil
                 isBusy = false
                 activity = repositoryURL == nil ? "Ready" : "Up to date"
                 if !(error is CancellationError) { present(error) }
                 return
             }
+            guard sshProbeTask == probeTask else { return }
             sshProbeTask = nil
             isBusy = false
             let sshRepository = try SSHRepository(
@@ -712,19 +738,23 @@ final class RepositoryModel: ObservableObject {
                 path: location.path,
                 isGitRepository: kind == .repository
             )
-            let base = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            )[0]
-                .appendingPathComponent("Kvist/SSH", isDirectory: true)
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let base = SSHMirrorStore.root
+                // One mirror per host and path, so reconnecting reuses it
+                // instead of leaving another copy of the remote files behind.
+                .appendingPathComponent(
+                    SHA256.hash(data: Data("\(location.host):\(location.path)".utf8))
+                        .prefix(8)
+                        .map { String(format: "%02x", $0) }
+                        .joined(),
+                    isDirectory: true
+                )
                 .appendingPathComponent(sshRepository.displayName, isDirectory: true)
             try FileManager.default.createDirectory(
                 at: base,
                 withIntermediateDirectories: true
             )
             try JSONEncoder().encode(sshRepository).write(
-                to: base.appendingPathComponent(".kvist-ssh"),
+                to: base.appendingPathComponent(SSHMirrorStore.markerName),
                 options: .atomic
             )
             await openRepository(base, overSSH: sshRepository)
@@ -876,6 +906,7 @@ final class RepositoryModel: ObservableObject {
             referencesByCommitHash = [:]
             detailRequestID = UUID()
             removeAllGitPreviewFiles()
+            conflictResolution = nil
             selectedChange = nil
             selectedCommit = nil
             selectedCommitFile = nil
@@ -944,14 +975,14 @@ final class RepositoryModel: ObservableObject {
         }
     }
 
-    func cancelRepositoryOpen() {
-        if let sshProbeTask {
+    func cancelRepositoryOpen(includingCloneAndConnection: Bool = true) {
+        if includingCloneAndConnection, let sshProbeTask {
             sshProbeTask.cancel()
             self.sshProbeTask = nil
             isBusy = false
             activity = repositoryURL == nil ? "Ready" : "Up to date"
         }
-        if repositoryCloneTask != nil {
+        if includingCloneAndConnection, repositoryCloneTask != nil {
             repositoryCloneTask?.cancel()
             repositoryCloneTask = nil
             isBusy = false
@@ -1004,7 +1035,7 @@ final class RepositoryModel: ObservableObject {
                     isGitRepository: true
                 )
                 try JSONEncoder().encode(repository).write(
-                    to: url.appendingPathComponent(".kvist-ssh"),
+                    to: url.appendingPathComponent(SSHMirrorStore.markerName),
                     options: .atomic
                 )
             } else {
@@ -1283,6 +1314,35 @@ final class RepositoryModel: ObservableObject {
                 isDetailLoading = false
                 present(error)
             }
+        }
+    }
+
+    /// Reloads the open working-tree diff after a working-tree refresh, so
+    /// edits made outside Kvist show up. It skips the loading state and
+    /// leaves conflicts alone, so a resolver draft is never reset.
+    private func refreshSelectedChangeDiffQuietly() {
+        guard workspaceMode == .sourceControl,
+              isDiffPanelPresented,
+              !isDetailLoading,
+              detailKind == .diff,
+              conflictResolution == nil,
+              let change = selectedChange,
+              change.status != "!",
+              let repositoryURL else { return }
+        let requestID = detailRequestID
+        let refreshID = UUID()
+        quietDiffRefreshID = refreshID
+        let client = GitClient(repositoryURL: repositoryURL, sshRepository: sshRepository)
+        Task {
+            guard let output = try? await Task.detached(priority: .utility, operation: {
+                try client.diff(for: change)
+            }).value,
+                  quietDiffRefreshID == refreshID,
+                  detailRequestID == requestID,
+                  selectedChange == change,
+                  !isDetailLoading else { return }
+            let text = output.isEmpty ? "No textual diff available." : output
+            if detailText != text { detailText = text }
         }
     }
 
@@ -1869,8 +1929,12 @@ final class RepositoryModel: ObservableObject {
     private func refreshEditedFileSearchMatches() {
         let query = repositorySearchQuery
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only a loaded source buffer is the file's text. While a file loads
+        // the buffer still holds the previous file, and previews have none.
         guard isFileSearchPresented,
               !query.isEmpty,
+              detailKind == .source,
+              !isDetailLoading,
               let editedPath = selectedRepositoryFilePath else { return }
 
         let existing = repositorySearchResults
@@ -1916,7 +1980,9 @@ final class RepositoryModel: ObservableObject {
             isFileSearchResultsPresented = true
         }
         let revision = repositoryFilesRevision
-        let editedPath = selectedRepositoryFilePath
+        let editedPath = detailKind == .source && !isDetailLoading
+            ? selectedRepositoryFilePath
+            : nil
         let editedText = repositoryFileText
         let searchesPlainFolder = isPlainFolder
         repositorySearchTask = Task { [weak self] in
@@ -2291,14 +2357,26 @@ final class RepositoryModel: ObservableObject {
         sshRepository: SSHRepository?,
         relativePath: String
     ) throws {
-        guard let data = text.data(using: .utf8) else {
+        let existing = try? Data(contentsOf: fileURL)
+        guard let data = RepositoryFileLoader.encode(text, matching: existing) else {
             throw CocoaError(.fileWriteInapplicableStringEncoding)
         }
+        let client = GitClient(repositoryURL: repositoryURL, sshRepository: sshRepository)
+        // The local copy holds what Kvist last downloaded. If the server's
+        // file differs, someone edited it there; uploading would erase that.
+        if let sshRepository, let existing,
+           try client.remoteFileContents(relativePath: relativePath) != existing {
+            throw RemoteFileChangedError(path: relativePath, host: sshRepository.host)
+        }
         try data.write(to: fileURL, options: .atomic)
-        try GitClient(
-            repositoryURL: repositoryURL,
-            sshRepository: sshRepository
-        ).uploadSSHFile(fileURL, relativePath: relativePath)
+        do {
+            try client.uploadSSHFile(fileURL, relativePath: relativePath)
+        } catch {
+            // Keep the local copy equal to the server's so the next save's
+            // change check compares against what the server really has.
+            if let existing { try? existing.write(to: fileURL, options: .atomic) }
+            throw error
+        }
     }
 
     private func rememberRepositoryFileSession() {
@@ -2321,6 +2399,9 @@ final class RepositoryModel: ObservableObject {
 
     private func restoreRepositoryFileSession() {
         guard let session = repositoryFileSession else { return }
+        // The live editor state takes over from here. A leftover session
+        // would later prompt about, or save, an outdated draft.
+        repositoryFileSession = nil
         selectedRepositoryFilePath = session.path
         detailTitle = session.title
         detailText = session.detailText
@@ -2374,6 +2455,9 @@ final class RepositoryModel: ObservableObject {
         conflictResolution = session.conflictResolution
         isDiffPanelPresented = session.isPanelPresented
         gitDetailSession = nil
+        // The change may have been committed or discarded while Files was
+        // showing.
+        closeDiffPanelIfSelectionWasRemoved()
     }
 
     func closeDiffPanel(preservingGitPreviewFiles: Bool = false) {
@@ -2651,6 +2735,12 @@ final class RepositoryModel: ObservableObject {
         await commit(stageAll: true, pushAfterCommit: true)
     }
 
+    func cancelAmend() {
+        isAmendingCommit = false
+        commitMessage = ""
+        activity = "Up to date"
+    }
+
     func amend() async {
         guard !isBusy,
               !isSavingRepositoryFile,
@@ -2794,6 +2884,7 @@ final class RepositoryModel: ObservableObject {
         let publicationScope = graphScope
         let requestID = UUID()
         snapshotRequestID = requestID
+        if isRefreshInProgress { pendingLiveRefresh = true }
         isLoadingMoreGraph = true
         activity = "Loading more history…"
 
@@ -3145,7 +3236,7 @@ final class RepositoryModel: ObservableObject {
         case .failure(let error) where error is PredictedMergeConflictError:
             let result = AppDialog.run(
                 title: "Resolve Merge Conflicts?",
-                message: "Git found conflicts between “\(branch)” and “\(reference.name)”. Start the merge and resolve them in Kvist?\n\nConflicted files will appear under Changes. Keep the current or incoming version of a whole file, or open it in Files to combine both. Stage edited files, then choose Continue Merge.",
+                message: "Git found conflicts between \"\(branch)\" and \"\(reference.name)\". Start the merge and resolve them in Kvist?\n\nConflicted files will appear under Changes. Keep the current or incoming version of a whole file, or open it in Files to combine both. Stage edited files, then choose Continue Merge.",
                 actions: [
                     AppDialogAction(title: "Cancel", role: .cancel),
                     AppDialogAction(title: "Start Merge", role: .primary)
@@ -3521,7 +3612,7 @@ final class RepositoryModel: ObservableObject {
     func reset(to commit: CommitInfo, mode: GitResetMode) async -> Bool {
         let branchLabel = branch.isEmpty || branch == "detached HEAD"
             ? "HEAD"
-            : "“\(branch)”"
+            : "\"\(branch)\""
         let title: String
         let message: String
         let actionTitle: String
@@ -3614,20 +3705,28 @@ final class RepositoryModel: ObservableObject {
     }
 
     func setGraphScope(_ scope: GraphScope) async {
-        guard graphScope != scope, !isGeneratingCommitMessage,
+        guard graphScope != scope, !isGeneratingCommitMessage, !isBusy,
               let repositoryURL else { return }
+        guard let knownHeadHash = headHash else {
+            // No commits yet, so there is no history to reload.
+            graphScope = scope
+            return
+        }
         graphHistoryLoadTask?.cancel()
         graphHistoryLoadTask = nil
         isLoadingMoreGraph = false
+        let previousScope = graphScope
         graphScope = scope
         graphLimit = graphPageSize
         let requestID = UUID()
         snapshotRequestID = requestID
+        // The new request ID discards a running refresh's result, so run
+        // that refresh again afterwards.
+        if isRefreshInProgress { pendingLiveRefresh = true }
         activity = "Switching graph scope…"
         let client = GitClient(repositoryURL: repositoryURL, sshRepository: sshRepository)
         let remoteReferenceID = upstreamReference?.id
         let pageSize = graphPageSize
-        guard let knownHeadHash = headHash else { return }
         let referencesByCommitHash = referencesByCommitHash
         let loadTask = Task.detached(priority: .userInitiated) {
             try client.historyPage(
@@ -3660,6 +3759,9 @@ final class RepositoryModel: ObservableObject {
             graphHistoryLoadTask = nil
             guard snapshotRequestID == requestID,
                   self.repositoryURL == repositoryURL else { return }
+            // The graph still shows the previous scope's history.
+            graphScope = previousScope
+            activity = "Up to date"
             if !(error is CancellationError) { present(error) }
         }
     }
@@ -3682,14 +3784,17 @@ final class RepositoryModel: ObservableObject {
             ? "Generating commit message from your instructions…"
             : "Generating commit message with \(configuration.provider.displayName)…"
 
+        let generationTask = Task.detached(priority: .userInitiated) {
+            try AICommitMessageGenerator(configuration: configuration).generate(
+                in: repositoryURL,
+                overSSH: sshRepository,
+                userInstructions: messageBeforeGeneration
+            )
+        }
+        commitMessageGenerationTask = generationTask
+        defer { commitMessageGenerationTask = nil }
         do {
-            let message = try await Task.detached(priority: .userInitiated) {
-                try AICommitMessageGenerator(configuration: configuration).generate(
-                    in: repositoryURL,
-                    overSSH: sshRepository,
-                    userInstructions: messageBeforeGeneration
-                )
-            }.value
+            let message = try await generationTask.value
             if self.repositoryURL == repositoryURL,
                commitMessage == messageBeforeGeneration {
                 commitMessage = message
@@ -3697,6 +3802,8 @@ final class RepositoryModel: ObservableObject {
             } else if self.repositoryURL == repositoryURL {
                 activity = "Generated message kept aside because you edited the field"
             }
+        } catch is CancellationError {
+            activity = "Commit message generation stopped"
         } catch {
             present(error)
         }
@@ -3704,6 +3811,11 @@ final class RepositoryModel: ObservableObject {
         isGeneratingCommitMessage = false
         await drainPendingWorkingTreeRefresh()
         await drainPendingLiveRefresh()
+    }
+
+    /// Stops a running commit message generation and the CLI it launched.
+    func cancelCommitMessageGeneration() {
+        commitMessageGenerationTask?.cancel()
     }
 
     private func confirmAIProcessingConsentIfNeeded(
@@ -3779,6 +3891,10 @@ final class RepositoryModel: ObservableObject {
               !isGeneratingCommitMessage else { return false }
         isBusy = true
         snapshotRequestID = UUID()
+        // A running refresh would be discarded anyway. Stopping it lets the
+        // refresh after the mutation run right away instead of queueing.
+        repositorySnapshotLoadTask?.cancel()
+        workingTreeSnapshotLoadTask?.cancel()
         workingTreeVersion += 1
         activity = message
         let client = GitClient(repositoryURL: repositoryURL, sshRepository: sshRepository)
@@ -3879,6 +3995,7 @@ final class RepositoryModel: ObservableObject {
         }
         workingTreeVersion += 1
         closeDiffPanelIfSelectionWasRemoved()
+        refreshSelectedChangeDiffQuietly()
 
         if workspaceMode == .fileEditor,
            let selectedRepositoryFilePath {
@@ -4175,9 +4292,13 @@ final class RepositoryModel: ObservableObject {
     private func scheduleWorkingTreeRefresh(
         delay: Duration = .zero
     ) {
-        guard monitoringEnabled,
-              repositoryURL != nil,
-              !pendingLiveRefresh else { return }
+        guard monitoringEnabled, repositoryURL != nil else { return }
+        // A pending full refresh covers the working tree too. Make sure it
+        // still runs instead of dropping this event.
+        if pendingLiveRefresh {
+            scheduleLiveRefresh()
+            return
+        }
         pendingWorkingTreeRefresh = true
         workingTreeRefreshTask?.cancel()
         workingTreeRefreshTask = Task { [weak self] in
@@ -4333,6 +4454,17 @@ struct RepositoryFileDiskVersion: Equatable {
             }
             : nil
     }
+
+    /// Identical content is the same version even with a newer date, as
+    /// after a `touch` or a Git checkout that rewrites the same bytes.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        if let lhsHash = lhs.contentHash, let rhsHash = rhs.contentHash {
+            return lhsHash == rhsHash
+        }
+        return lhs.contentModificationDate == rhs.contentModificationDate
+            && lhs.fileSize == rhs.fileSize
+            && lhs.contentHash == rhs.contentHash
+    }
 }
 
 private struct GitDetailSession {
@@ -4345,4 +4477,13 @@ private struct GitDetailSession {
     let detailMode: GitFileDetailMode
     let conflictResolution: ConflictResolutionSession?
     let isPanelPresented: Bool
+}
+
+struct RemoteFileChangedError: LocalizedError {
+    let path: String
+    let host: String
+
+    var errorDescription: String? {
+        "\(path) changed on \(host) after Kvist opened it. Copy your edits, reopen the file to load the server's version, and apply them again."
+    }
 }

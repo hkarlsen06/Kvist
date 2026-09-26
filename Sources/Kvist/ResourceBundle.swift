@@ -7,8 +7,8 @@ extension Bundle {
     /// `Contents/Resources` inside the packaged app, beside the binary in a plain
     /// build directory, and beside the `.xctest` bundle under `swift test`. The
     /// accessor SwiftPM generates for executable targets only looks beside the
-    /// binary — relative to `Bundle.main.bundleURL`, which for an app is the `.app`
-    /// itself — so it misses the packaged layout and traps. Falling back to `.main`
+    /// binary, relative to `Bundle.main.bundleURL`. For an app that is the `.app`
+    /// itself, so it misses the packaged layout and traps. Falling back to `.main`
     /// keeps a missing bundle to missing icons rather than a crash on launch; every
     /// call site already tolerates absent resources.
     static nonisolated let kvistResources: Bundle = {

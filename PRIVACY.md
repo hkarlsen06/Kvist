@@ -1,10 +1,18 @@
-# Kvist Privacy Notice
+# Kvist privacy notice
 
 Effective: September 26, 2026
 
 Kvist does not include advertising, analytics, telemetry, or a developer-
 operated account service. Repository browsing, editing, Git commands, settings,
 and workspace restoration are handled locally on the Mac.
+
+## Remote folders over SSH
+
+When the user opens a folder over SSH, Kvist connects with the Mac's `ssh`
+configuration and keys. Git commands and file searches run on the remote
+machine. Files the user opens are copied to a folder in Kvist's Application
+Support directory on the Mac so they can be edited, and saved edits are copied
+back to the remote machine. Kvist sends no data to any other party.
 
 ## AI commit-message generation
 
@@ -21,14 +29,21 @@ when authorized to send the staged source code to the service configured in the
 selected command-line tool. The selected provider's terms and privacy policy
 govern its processing.
 
-The provider, model identifier, Codex reasoning effort, and complete command
-template are visible in Kvist Preferences. Advanced users may edit the command. Kvist expands the
-documented placeholders, sends the generation prompt over standard input, and
-runs the result through `/bin/zsh -lc` with the user's permissions. A custom
-command may process or transmit data beyond Kvist's default behavior.
+Kvist Settings shows the provider. The model identifier, Codex reasoning
+effort, and complete command template are under Advanced, where users may edit
+the command.
+Kvist expands the documented placeholders, sends the generation prompt over
+standard input, and runs the result through `/bin/zsh -lc` with the user's
+permissions. A custom command may process or transmit data beyond Kvist's
+default behavior.
+
+For a repository opened over SSH, Kvist runs the selected command-line tool on
+the remote machine under the SSH account instead. That tool must be installed
+and signed in there, and its account on that machine determines where the data
+goes.
 
 Consent is stored separately for Codex and Claude and can be withdrawn in Kvist
-Preferences. The next attempt with that provider will show the disclosure again.
+Settings. The next attempt with that provider will show the disclosure again.
 
 ## Theme discovery
 
@@ -39,7 +54,7 @@ and the Open VSX terms and privacy practices.
 
 ## Update checks
 
-Unless automatic update checks are turned off in Kvist Preferences, Kvist
+Unless automatic update checks are turned off in Kvist Settings, Kvist
 connects to GitHub once a day to read the list of Kvist releases. Kvist also
 connects when the user chooses Check for Updates. GitHub receives normal
 network information. Kvist sends no repository data. When the user installs an
