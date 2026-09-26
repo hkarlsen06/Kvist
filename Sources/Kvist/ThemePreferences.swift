@@ -1591,6 +1591,7 @@ private struct GeneralPreferencesPane: View {
     /// object re-renders the pane when the selected theme changes.
     @EnvironmentObject private var themes: ThemePreferences
     @AppStorage("restoreWorkspaceOnLaunch") private var restoreWorkspaceOnLaunch = true
+    @AppStorage(AppUpdater.automaticChecksKey) private var checksForUpdates = true
     @AppStorage("smartCommitPreference") private var smartCommitPreference = 0
     @AppStorage(AICommitMessagePreferences.providerKey)
     private var aiProviderRawValue = AICommitMessageProvider.codex.rawValue
@@ -1669,6 +1670,25 @@ private struct GeneralPreferencesPane: View {
                     PreferencesRowDivider()
                     PreferencesRow {
                         PreferencesCaption(text: "Open tabs, the selected tab, Files mode, expanded folders, commit text, and unsaved editor drafts are recovered.")
+                    }
+                }
+
+                PreferencesSection("Updates") {
+                    PreferencesRow {
+                        HStack {
+                            Text("Check for updates automatically")
+                            Spacer()
+                            Toggle(
+                                "Check for updates automatically",
+                                isOn: $checksForUpdates
+                            )
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                        }
+                    }
+                    PreferencesRowDivider()
+                    PreferencesRow {
+                        PreferencesCaption(text: "Kvist asks GitHub for new releases once a day and asks before installing one. Use Kvist > Check for Updates to check now.")
                     }
                 }
 

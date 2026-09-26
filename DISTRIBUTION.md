@@ -41,6 +41,21 @@ KVIST_NOTARY_PROFILE="kvist-notary" \
 Scripts/release.sh
 ```
 
+## In-app updates
+
+Kvist checks the GitHub releases of `hkarlsen06/Kvist` and offers the newest
+release that meets all of these conditions:
+
+- It is published and is not a prerelease.
+- Its tag is `macos/<version>`, and `<version>` is greater than the running
+  app's `CFBundleShortVersionString`.
+- It has a `Kvist.zip` asset whose app has that same version.
+
+Kvist installs the archive only if the downloaded app satisfies the running
+app's designated requirement. Sign every release with the same Developer ID
+team, or installed copies will refuse the update. Ad-hoc-signed local builds
+cannot update themselves.
+
 `Scripts/package.sh` intentionally creates an ad-hoc-signed local development
 build when `KVIST_SIGNING_IDENTITY` is not set. Do not distribute that build.
 

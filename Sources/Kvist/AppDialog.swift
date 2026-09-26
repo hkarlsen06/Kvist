@@ -142,9 +142,9 @@ enum AppDialog {
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.accessoryView = AppDialogDisclosureAccessoryView(
-            disclosure: disclosure
-        )
+        let accessory = AppDialogDisclosureAccessoryView(disclosure: disclosure)
+        accessory.alert = alert
+        alert.accessoryView = accessory
 
         let orderedActions = actions.enumerated().sorted {
             actionPriority($0.element.role) < actionPriority($1.element.role)
@@ -215,6 +215,10 @@ enum AppDialog {
 
 @MainActor
 final class AppDialogDisclosureAccessoryView: NSView {
+    /// NSAlert keeps the accessory's container at the size it had during the
+    /// first layout. Without another layout pass the expanded content draws
+    /// outside the container, where it receives no clicks or scroll events.
+    weak var alert: NSAlert?
     private let disclosure: AppDialogDisclosure
     private let disclosureButton: NSButton
     private let diffView: NSView
@@ -337,6 +341,7 @@ final class AppDialogDisclosureAccessoryView: NSView {
         windowFrame.origin.y -= heightChange
         windowFrame.size.height += heightChange
         window.setFrame(windowFrame, display: true, animate: true)
+        alert?.layout()
     }
 
     private static let buttonHeight: CGFloat = 24

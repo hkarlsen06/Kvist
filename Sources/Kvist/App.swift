@@ -107,6 +107,12 @@ struct KvistApp: App {
         .defaultSize(width: 465, height: 886)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await AppUpdater.check(userInitiated: true) }
+                }
+            }
+
             // Menu validation reads the active repository model, so publish
             // the first frame before constructing the command hierarchy.
             if hasPresentedInitialFrame {
@@ -329,6 +335,9 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if KvistPerformanceInstrumentation.configuration == nil {
+            AppUpdater.checkAutomaticallyIfDue()
+        }
         guard let model = tabsModel?.activeModel,
               model.sshRepository != nil else { return }
         Task { await model.refresh() }

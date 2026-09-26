@@ -1,6 +1,6 @@
 # Kvist Privacy Notice
 
-Effective: July 21, 2026
+Effective: September 26, 2026
 
 Kvist does not include advertising, analytics, telemetry, or a developer-
 operated account service. Repository browsing, editing, Git commands, settings,
@@ -36,6 +36,15 @@ When the user searches for or imports a theme, Kvist connects directly to
 the Eclipse Open VSX registry. Open VSX receives normal network information and
 the search query. Imported themes remain subject to their publisher's license
 and the Open VSX terms and privacy practices.
+
+## Update checks
+
+Unless automatic update checks are turned off in Kvist Preferences, Kvist
+connects to GitHub once a day to read the list of Kvist releases. Kvist also
+connects when the user chooses Check for Updates. GitHub receives normal
+network information. Kvist sends no repository data. When the user installs an
+update, Kvist downloads the release archive from GitHub. The GitHub privacy
+statement governs that processing.
 
 ## Support
 
