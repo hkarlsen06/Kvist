@@ -408,6 +408,22 @@ final class WorkspaceTabsModel: ObservableObject {
         persistTabs()
     }
 
+    /// Selects the tab that shows the worktree, or opens it in a new tab
+    /// after the active one so each worktree keeps its own drafts and panels.
+    func switchToWorktree(_ worktree: GitWorktree) {
+        let path = worktree.url.standardizedFileURL.path
+        if let tab = tabs.first(where: { $0.repositoryPath == path }) {
+            select(tab.id)
+            return
+        }
+        let tab = RepositoryTab(repositoryURL: worktree.url)
+        let index = tabs.firstIndex(where: { $0.id == activeTabID }) ?? tabs.count - 1
+        tabs.insert(tab, at: index + 1)
+        observeRepository(tab)
+        activeTabID = tab.id
+        persistTabs()
+    }
+
     func select(_ tabID: UUID) {
         guard tabID != activeTabID,
               tabs.contains(where: { $0.id == tabID }) else { return }

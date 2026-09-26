@@ -152,6 +152,53 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(result.output.trimmingCharacters(in: .whitespacesAndNewlines), "rebase")
     }
 
+    func testWorktreeParserSkipsBareAndPrunableEntries() {
+        let output = """
+        worktree /Repos/bare.git
+        bare
+
+        worktree /Repos/main with spaces
+        HEAD 1111111111111111111111111111111111111111
+        branch refs/heads/main
+
+        worktree /Repos/detached
+        HEAD 2222222222222222222222222222222222222222
+        detached
+
+        worktree /Repos/gone
+        HEAD 3333333333333333333333333333333333333333
+        branch refs/heads/gone
+        prunable gitdir file points to non-existent location
+
+        """
+
+        XCTAssertEqual(GitClient.parseWorktrees(output), [
+            GitWorktree(path: "/Repos/main with spaces", branch: "main"),
+            GitWorktree(path: "/Repos/detached", branch: nil)
+        ])
+    }
+
+    func testWorktreesListsLinkedCheckouts() throws {
+        try "one".write(
+            to: repositoryURL.appendingPathComponent("one.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try git(["add", "one.txt"])
+        _ = try git(["commit", "-m", "One"])
+        let linkedURL = repositoryURL.appendingPathComponent("linked", isDirectory: true)
+        _ = try git(["worktree", "add", "-b", "feature", linkedURL.path])
+
+        let worktrees = try GitClient(repositoryURL: repositoryURL).worktrees()
+
+        XCTAssertEqual(worktrees.count, 2)
+        XCTAssertEqual(worktrees.last?.branch, "feature")
+        XCTAssertEqual(
+            worktrees.last?.url.resolvingSymlinksInPath().path,
+            linkedURL.resolvingSymlinksInPath().path
+        )
+    }
+
     func testRemoteListingParserReadsFetchAndPushURLsInOneResponse() throws {
         let output = """
         upstream\tssh://git@example.com/second.git (push)

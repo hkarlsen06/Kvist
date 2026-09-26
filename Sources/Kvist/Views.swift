@@ -197,7 +197,10 @@ struct ContentView: View {
 
             ActiveRepositoryView(tab: tabsModel.activeTab)
 
-            RepositoryStatusBar(tab: tabsModel.activeTab)
+            RepositoryStatusBar(
+                tab: tabsModel.activeTab,
+                switchToWorktree: tabsModel.switchToWorktree
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.canvas)
@@ -209,10 +212,12 @@ struct ContentView: View {
 private struct RepositoryStatusBar: View {
     @ObservedObject private var tab: RepositoryTab
     @ObservedObject var model: RepositoryModel
+    let switchToWorktree: (GitWorktree) -> Void
 
-    init(tab: RepositoryTab) {
+    init(tab: RepositoryTab, switchToWorktree: @escaping (GitWorktree) -> Void) {
         _tab = ObservedObject(wrappedValue: tab)
         _model = ObservedObject(wrappedValue: tab.model)
+        self.switchToWorktree = switchToWorktree
     }
 
     var body: some View {
@@ -331,6 +336,16 @@ private struct RepositoryStatusBar: View {
 
             Divider()
 
+            // A worktree is another folder with its own checked-out branch,
+            // so switching between them sits beside checking out branches.
+            if model.worktrees.count > 1 {
+                Section("Worktrees") {
+                    ForEach(model.worktrees) { worktree in
+                        worktreeMenuItem(worktree)
+                    }
+                }
+            }
+
             if localBranches.isEmpty && remoteBranches.isEmpty {
                 Text(model.repositoryURL == nil ? "Open a repository first" : "No branches")
             } else {
@@ -375,9 +390,36 @@ private struct RepositoryStatusBar: View {
         )
     }
 
+    private func worktreeMenuItem(_ worktree: GitWorktree) -> some View {
+        let title = "\(worktree.url.lastPathComponent) (\(worktree.branch ?? "detached HEAD"))"
+        return Button {
+            switchToWorktree(worktree)
+        } label: {
+            if isCurrentWorktree(worktree) {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+        .help(worktree.path)
+    }
+
+    private func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
+        worktree.url.standardizedFileURL.path == model.repositoryURL?.standardizedFileURL.path
+    }
+
     private func branchMenuItem(_ reference: GitReference) -> some View {
         Button {
-            Task { await model.checkout(reference) }
+            // Git refuses to check out a branch that another worktree has
+            // checked out, so go to that worktree instead.
+            if reference.kind == .localBranch,
+               let worktree = model.worktrees.first(where: {
+                   $0.branch == reference.name && !isCurrentWorktree($0)
+               }) {
+                switchToWorktree(worktree)
+            } else {
+                Task { await model.checkout(reference) }
+            }
         } label: {
             if reference.isHead {
                 Label(reference.name, systemImage: "checkmark")

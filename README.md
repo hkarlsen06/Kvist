@@ -13,6 +13,7 @@ browser and editor for any folder on a remote machine over SSH.
 - Switch between Git and Files modes (`⌘1` / `⌘2`, or `⌃Tab` to toggle)
 - Edit text files in a native source editor with `⌘S` saving, and preview other file types with macOS Quick Look
 - Create, rename, delete, and check out local or remote-tracking branches
+- Switch to another worktree from the branch menu in the status bar. Kvist opens it in its own tab, or selects the tab that already shows it
 - View staged, modified, deleted, renamed, and untracked files
 - Stage or unstage one file or all files, stash changes, or discard all changes with confirmation
 - Inspect working-tree and staged diffs with character-level highlights for the changed parts of a line

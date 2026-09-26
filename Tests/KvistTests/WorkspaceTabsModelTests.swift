@@ -439,6 +439,30 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.activeTabID, tabIDs[0])
     }
 
+    func testSwitchingToWorktreeReusesItsTabOrOpensOneAfterTheActiveTab() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let main = root.appendingPathComponent("main", isDirectory: true)
+        let other = root.appendingPathComponent("other", isDirectory: true)
+        let feature = root.appendingPathComponent("feature", isDirectory: true)
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [main, other],
+            persistenceEnabled: false
+        )
+        let tabIDs = tabsModel.tabs.map(\.id)
+
+        tabsModel.switchToWorktree(GitWorktree(path: other.path, branch: "other"))
+        XCTAssertEqual(tabsModel.activeTabID, tabIDs[1])
+        XCTAssertEqual(tabsModel.tabs.count, 2)
+
+        tabsModel.select(tabIDs[0])
+        tabsModel.switchToWorktree(GitWorktree(path: feature.path, branch: "feature"))
+        XCTAssertEqual(tabsModel.tabs.count, 3)
+        XCTAssertEqual(tabsModel.tabs[1].repositoryURL?.path, feature.path)
+        XCTAssertEqual(tabsModel.activeTabID, tabsModel.tabs[1].id)
+    }
+
     func testCloseOthersKeepsOnlyTheGivenTab() {
         let tabsModel = WorkspaceTabsModel(
             defaults: isolatedDefaults(),

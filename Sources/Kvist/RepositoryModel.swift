@@ -79,6 +79,7 @@ private struct RepositoryOpenResult: Sendable {
     let rootURL: URL
     let snapshot: RepositorySnapshot
     let remotes: [GitRemote]
+    let worktrees: [GitWorktree]
     let activeOperation: GitOperation?
     let watchPaths: [String]
     let isPlainFolder: Bool
@@ -87,6 +88,7 @@ private struct RepositoryOpenResult: Sendable {
 private struct RepositoryRefreshResult: Sendable {
     let snapshot: RepositorySnapshot
     let remotes: [GitRemote]
+    let worktrees: [GitWorktree]
     let activeOperation: GitOperation?
 }
 
@@ -131,6 +133,7 @@ final class RepositoryModel: ObservableObject {
     @Published private(set) var isRebaseInProgress = false
     @Published private(set) var activeOperation: GitOperation?
     @Published private(set) var remotes: [GitRemote] = []
+    @Published private(set) var worktrees: [GitWorktree] = []
     @Published private(set) var fastForwardReferenceIDs: Set<String> = []
     @Published private(set) var graphScope: GraphScope = .all
     @Published private(set) var isLoadingMoreGraph = false
@@ -820,6 +823,7 @@ final class RepositoryModel: ObservableObject {
                         rootURL: url,
                         snapshot: .empty,
                         remotes: [],
+                        worktrees: [],
                         activeOperation: nil,
                         watchPaths: sshRepository == nil
                             ? [url.standardizedFileURL.path]
@@ -853,11 +857,15 @@ final class RepositoryModel: ObservableObject {
                 async let watchPaths = Task.detached(priority: .userInitiated) {
                     try client.repositoryWatchPaths()
                 }.value
+                async let worktrees = Task.detached(priority: .userInitiated) {
+                    (try? client.worktrees()) ?? []
+                }.value
                 let loadedSnapshot = try await snapshot
                 return RepositoryOpenResult(
                     rootURL: root,
                     snapshot: loadedSnapshot,
                     remotes: try await remotes,
+                    worktrees: await worktrees,
                     activeOperation: loadedSnapshot.activeOperation,
                     watchPaths: try await watchPaths,
                     isPlainFolder: false
@@ -928,6 +936,7 @@ final class RepositoryModel: ObservableObject {
             apply(result.snapshot)
             applyRepositoryMetadata(
                 remotes: result.remotes,
+                worktrees: result.worktrees,
                 activeOperation: result.activeOperation
             )
             if persistsLastRepository {
@@ -1133,10 +1142,14 @@ final class RepositoryModel: ObservableObject {
                 async let remotes = Task.detached(priority: .userInitiated) {
                     try client.remotes()
                 }.value
+                async let worktrees = Task.detached(priority: .userInitiated) {
+                    (try? client.worktrees()) ?? []
+                }.value
                 let loadedSnapshot = try await snapshot
                 return RepositoryRefreshResult(
                     snapshot: loadedSnapshot,
                     remotes: try await remotes,
+                    worktrees: await worktrees,
                     activeOperation: loadedSnapshot.activeOperation
                 )
             }
@@ -1155,6 +1168,7 @@ final class RepositoryModel: ObservableObject {
                 )
                 applyRepositoryMetadata(
                     remotes: result.remotes,
+                    worktrees: result.worktrees,
                     activeOperation: result.activeOperation
                 )
                 if sshRepository != nil {
@@ -3969,9 +3983,11 @@ final class RepositoryModel: ObservableObject {
 
     private func applyRepositoryMetadata(
         remotes: [GitRemote],
+        worktrees: [GitWorktree],
         activeOperation: GitOperation?
     ) {
         if self.remotes != remotes { self.remotes = remotes }
+        if self.worktrees != worktrees { self.worktrees = worktrees }
         if remotes.isEmpty {
             autoFetchTask?.cancel()
             autoFetchTask = nil

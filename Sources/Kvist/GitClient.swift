@@ -239,6 +239,15 @@ struct GitRemote: Identifiable, Hashable, Sendable {
     }
 }
 
+struct GitWorktree: Identifiable, Hashable, Sendable {
+    let path: String
+    /// The checked-out branch's short name, or nil for a detached HEAD.
+    let branch: String?
+
+    var id: String { path }
+    var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
+}
+
 enum GitOperation: String, CaseIterable, Hashable, Sendable {
     case rebase
     case merge
@@ -2030,6 +2039,30 @@ struct GitClient: Sendable {
 
     func remotes() throws -> [GitRemote] {
         try Self.parseRemotes(run(["remote", "-v"]))
+    }
+
+    /// Local worktrees only: an SSH repository's worktree paths are on the
+    /// remote host.
+    func worktrees() throws -> [GitWorktree] {
+        guard sshRepository == nil else { return [] }
+        return Self.parseWorktrees(try run(["worktree", "list", "--porcelain"]))
+    }
+
+    /// Skips bare entries and worktrees whose folder is gone.
+    static func parseWorktrees(_ output: String) -> [GitWorktree] {
+        output.components(separatedBy: "\n\n").compactMap { block in
+            var path: String?
+            var branch: String?
+            for line in block.split(whereSeparator: \.isNewline) {
+                if line == "bare" || line.hasPrefix("prunable") { return nil }
+                if line.hasPrefix("worktree ") {
+                    path = String(line.dropFirst("worktree ".count))
+                } else if line.hasPrefix("branch refs/heads/") {
+                    branch = String(line.dropFirst("branch refs/heads/".count))
+                }
+            }
+            return path.map { GitWorktree(path: $0, branch: branch) }
+        }
     }
 
     static func parseRemotes(_ output: String) throws -> [GitRemote] {
