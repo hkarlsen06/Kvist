@@ -172,6 +172,7 @@ final class GitClientTests: XCTestCase {
 
         """
 
+        XCTAssertEqual(GitClient.parseWorktrees(output, sshHost: "example").first?.sshHost, "example")
         XCTAssertEqual(GitClient.parseWorktrees(output), [
             GitWorktree(path: "/Repos/main with spaces", branch: "main"),
             GitWorktree(path: "/Repos/detached", branch: nil)
@@ -186,6 +187,8 @@ final class GitClientTests: XCTestCase {
         )
         _ = try git(["add", "one.txt"])
         _ = try git(["commit", "-m", "One"])
+        // No linked worktree yet, so no Git process and no list.
+        XCTAssertEqual(try GitClient(repositoryURL: repositoryURL).worktrees(), [])
         let linkedURL = repositoryURL.appendingPathComponent("linked", isDirectory: true)
         _ = try git(["worktree", "add", "-b", "feature", linkedURL.path])
 
@@ -196,6 +199,149 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(
             worktrees.last?.url.resolvingSymlinksInPath().path,
             linkedURL.resolvingSymlinksInPath().path
+        )
+    }
+
+    func testAddWorktreeCreatesOrChecksOutTheBranchAndRemoveNeedsForceForChanges() throws {
+        try commitFile("one.txt", "one")
+        _ = try git(["branch", "existing"])
+        let client = GitClient(repositoryURL: repositoryURL)
+        let newURL = repositoryURL.appendingPathComponent("new", isDirectory: true)
+        let existingURL = repositoryURL.appendingPathComponent("existing", isDirectory: true)
+
+        try client.addWorktree(path: newURL.path, branch: "feature/new")
+        try client.addWorktree(path: existingURL.path, branch: "existing")
+
+        XCTAssertEqual(
+            Set(try client.worktrees().map(\.branch)),
+            ["main", "feature/new", "existing"]
+        )
+
+        try "draft".write(
+            to: newURL.appendingPathComponent("draft.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertThrowsError(try client.removeWorktree(path: newURL.path)) { error in
+            XCTAssertTrue((error as? GitCommandError)?.output.contains("--force") == true)
+        }
+        try client.removeWorktree(path: newURL.path, force: true)
+        try client.removeWorktree(path: existingURL.path)
+
+        // Git deletes its worktrees folder with the last linked worktree.
+        XCTAssertEqual(try client.worktrees(), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: newURL.path))
+    }
+
+    func testFastForwardReferencesParserSplitsTargetsAndBranchesBehindHead() {
+        let output = """
+        refs/heads/feature\t0 0
+        refs/heads/main\t0 2
+        refs/heads/other\t1 2
+        refs/remotes/origin/feature\t3 0
+        refs/remotes/origin/main\t0 4
+        """
+
+        let references = GitClient.parseFastForwardReferences(output)
+
+        XCTAssertEqual(
+            references.targets,
+            ["refs/heads/feature", "refs/remotes/origin/feature"]
+        )
+        XCTAssertEqual(references.branchesBehindHead, ["refs/heads/main"])
+    }
+
+    @MainActor
+    func testMainFastForwardsToTheCurrentBranchWithoutCheckingItOut() async throws {
+        try commitFile("one.txt", "one")
+        _ = try git(["switch", "-c", "feature"])
+        try commitFile("two.txt", "two")
+        let model = RepositoryModel(
+            restoresLastRepository: false,
+            persistsLastRepository: false,
+            monitoringEnabled: false
+        )
+        await model.openRepository(repositoryURL)
+        let main = try XCTUnwrap(model.references.first { $0.id == "refs/heads/main" })
+        XCTAssertTrue(model.canFastForwardToHead(main))
+
+        let fastForwarded = await model.fastForwardToHead(main)
+
+        XCTAssertTrue(fastForwarded)
+        XCTAssertEqual(model.branch, "feature")
+        XCTAssertEqual(try git(["rev-parse", "main"]), try git(["rev-parse", "feature"]))
+        XCTAssertFalse(model.canFastForwardToHead(main))
+    }
+
+    @MainActor
+    func testMainCheckedOutInAnotherWorktreeFastForwardsThere() async throws {
+        try commitFile("one.txt", "one")
+        // Outside the main worktree, which would otherwise see it as an
+        // untracked folder and refuse to merge.
+        let linkedURL = repositoryURL.deletingLastPathComponent()
+            .appendingPathComponent(repositoryURL.lastPathComponent + "-linked", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: linkedURL) }
+        _ = try git(["worktree", "add", "-b", "feature", linkedURL.path])
+        try "two".write(
+            to: linkedURL.appendingPathComponent("two.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try git(["-C", linkedURL.path, "add", "two.txt"])
+        _ = try git(["-C", linkedURL.path, "commit", "-m", "Two"])
+        let model = RepositoryModel(
+            restoresLastRepository: false,
+            persistsLastRepository: false,
+            monitoringEnabled: false
+        )
+        await model.openRepository(linkedURL)
+        let main = try XCTUnwrap(model.references.first { $0.id == "refs/heads/main" })
+
+        let fastForwarded = await model.fastForwardToHead(main)
+
+        XCTAssertTrue(fastForwarded)
+        XCTAssertEqual(try git(["rev-parse", "main"]), try git(["rev-parse", "feature"]))
+        // The main worktree's files moved with its branch.
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: repositoryURL.appendingPathComponent("two.txt").path
+        ))
+        XCTAssertEqual(try git(["status", "--porcelain", "--untracked-files=no"]), "")
+    }
+
+    @MainActor
+    func testBranchCheckedOutInAnotherWorktreeIsCheckedOutAndRebasedThere() async throws {
+        try commitFile("one.txt", "one")
+        let linkedURL = repositoryURL.appendingPathComponent("linked", isDirectory: true)
+        _ = try git(["worktree", "add", "-b", "feature", linkedURL.path])
+        try "feature".write(
+            to: linkedURL.appendingPathComponent("feature.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try git(["-C", linkedURL.path, "add", "feature.txt"])
+        _ = try git(["-C", linkedURL.path, "commit", "-m", "Feature"])
+        try commitFile("two.txt", "two")
+        let model = RepositoryModel(
+            restoresLastRepository: false,
+            persistsLastRepository: false,
+            monitoringEnabled: false
+        )
+        await model.openRepository(repositoryURL)
+        var switchedTo: [GitWorktree] = []
+        model.switchToWorktree = { switchedTo.append($0) }
+        let feature = try XCTUnwrap(model.references.first { $0.id == "refs/heads/feature" })
+        let main = try XCTUnwrap(model.references.first { $0.id == "refs/heads/main" })
+
+        let checkedOut = await model.checkout(feature)
+        let rebased = await model.rebase(feature, onto: main)
+
+        XCTAssertTrue(checkedOut)
+        XCTAssertEqual(switchedTo.map(\.branch), ["feature"])
+        XCTAssertEqual(model.branch, "main")
+        XCTAssertTrue(rebased)
+        XCTAssertEqual(
+            try git(["merge-base", "main", "feature"]),
+            try git(["rev-parse", "main"])
         )
     }
 
@@ -2361,6 +2507,16 @@ final class GitClientTests: XCTestCase {
             references: [],
             subject: subject
         )
+    }
+
+    private func commitFile(_ name: String, _ contents: String) throws {
+        try contents.write(
+            to: repositoryURL.appendingPathComponent(name),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try git(["add", name])
+        _ = try git(["commit", "-m", name])
     }
 
     @discardableResult

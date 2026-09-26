@@ -463,6 +463,68 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.activeTabID, tabsModel.tabs[1].id)
     }
 
+    func testSwitchingToSSHWorktreeFindsTheTabShowingThatRemotePath() throws {
+        let mirror = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: mirror, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: mirror) }
+        try JSONEncoder().encode(SSHRepository(host: "example", path: "/srv/feature"))
+            .write(to: mirror.appendingPathComponent(SSHMirrorStore.markerName))
+        let local = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [mirror, local],
+            persistenceEnabled: false,
+            automaticallyActivatesInitialTab: false
+        )
+        let mirrorTabID = tabsModel.tabs[0].id
+
+        tabsModel.switchToWorktree(
+            GitWorktree(path: "/srv/feature", branch: "feature", sshHost: "example")
+        )
+
+        XCTAssertEqual(tabsModel.tabs.count, 2)
+        XCTAssertEqual(tabsModel.activeTabID, mirrorTabID)
+    }
+
+    func testRemovingTheActiveWorktreeClosesItsTabAndShowsTheMainWorktree() async throws {
+        let mainURL = try temporaryDirectory()
+        let linkedURL = mainURL.deletingLastPathComponent()
+            .appendingPathComponent(mainURL.lastPathComponent + "-linked", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: mainURL)
+            try? FileManager.default.removeItem(at: linkedURL)
+        }
+        try GitClient.initializeRepository(at: mainURL, createGitIgnore: false)
+        let client = GitClient(repositoryURL: mainURL)
+        _ = try client.run([
+            "-c", "user.name=Kvist Test", "-c", "user.email=kvist@example.invalid",
+            "commit", "--allow-empty", "-m", "Initial"
+        ])
+        try client.addWorktree(path: linkedURL.path, branch: "feature")
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [mainURL, linkedURL],
+            persistenceEnabled: false
+        )
+        let mainTab = tabsModel.tabs[0]
+        let linkedTab = tabsModel.tabs[1]
+        tabsModel.select(linkedTab.id)
+        await waitForRepositoryLoad(in: linkedTab)
+        let linked = try XCTUnwrap(linkedTab.model.worktrees.first { $0.branch == "feature" })
+
+        tabsModel.removeWorktree(linked)
+        let deadline = Date().addingTimeInterval(5)
+        while tabsModel.tabs.count > 1, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [mainTab.id])
+        XCTAssertEqual(tabsModel.activeTabID, mainTab.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: linkedURL.path))
+    }
+
     func testCloseOthersKeepsOnlyTheGivenTab() {
         let tabsModel = WorkspaceTabsModel(
             defaults: isolatedDefaults(),

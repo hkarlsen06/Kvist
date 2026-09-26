@@ -13,7 +13,8 @@ final class CodiconTests: XCTestCase {
         .repoPull: "73bf9b5bb3dcff6fda97f2f1ebfc101994f828cd3a419b9ab1536760f72c31ff",
         .repoPush: "46dc9358c549d6264fade7ac9a9f8ef0bbbb21cdf037dff4e1ea8b3eae2c9f35",
         .sync: "3423d94a76e84061f67cc6172692bd5cc330a13985a2090c25669659918f583e",
-        .check: "58e1762d74142ee78ee2422ae46498c1059e4f4812f9c7514e422a1f8d80235d"
+        .check: "58e1762d74142ee78ee2422ae46498c1059e4f4812f9c7514e422a1f8d80235d",
+        .worktree: "88bdb054ccbf247597b8266672b262ac300b84ef87d90c3e6d900b02c8e921c9"
     ]
 
     func testEveryVendoredCodiconLoadsAsAnImage() {

@@ -223,6 +223,15 @@ enum GitHistoryScope: Hashable, Sendable {
     case reflog
 }
 
+struct FastForwardReferences: Equatable, Sendable {
+    /// Branches HEAD can fast-forward to.
+    var targets: Set<String>
+    /// Local branches that can fast-forward to HEAD.
+    var branchesBehindHead: Set<String>
+
+    static let none = FastForwardReferences(targets: [], branchesBehindHead: [])
+}
+
 struct GitRemote: Identifiable, Hashable, Sendable {
     let name: String
     let fetchURL: String
@@ -243,9 +252,12 @@ struct GitWorktree: Identifiable, Hashable, Sendable {
     let path: String
     /// The checked-out branch's short name, or nil for a detached HEAD.
     let branch: String?
+    /// Set when the worktree is on an SSH host. `path` is then a remote path.
+    var sshHost: String?
 
     var id: String { path }
     var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
+    var name: String { url.lastPathComponent }
 }
 
 enum GitOperation: String, CaseIterable, Hashable, Sendable {
@@ -270,6 +282,8 @@ struct RepositorySnapshot: Sendable {
     let isRebaseInProgress: Bool
     let activeOperation: GitOperation?
     let fastForwardReferenceIDs: Set<String>
+    /// Local branches that HEAD contains, which can move forward to HEAD.
+    let branchesBehindHeadIDs: Set<String>
     let historyOffset: Int
     let graphHasMore: Bool
     let graphLayoutState: GraphLayoutState
@@ -292,6 +306,7 @@ struct RepositorySnapshot: Sendable {
         isRebaseInProgress: false,
         activeOperation: nil,
         fastForwardReferenceIDs: [],
+        branchesBehindHeadIDs: [],
         historyOffset: 0,
         graphHasMore: false,
         graphLayoutState: GraphLayoutState(),
@@ -1168,11 +1183,11 @@ struct GitClient: Sendable {
                 layoutState: GraphLayoutState()
             )
         }
-        let fastForwardReferenceIDs: Set<String> = status.headHash == nil
-            ? []
+        let fastForwardReferences: FastForwardReferences = status.headHash == nil
+            ? .none
             : {
-                guard !Task.isCancelled else { return Set<String>() }
-                return self.fastForwardReferenceIDs()
+                guard !Task.isCancelled else { return .none }
+                return self.fastForwardReferences()
             }()
 
         try Task.checkCancellation()
@@ -1191,7 +1206,8 @@ struct GitClient: Sendable {
             hasUpstream: status.hasUpstream && upstream != nil,
             isRebaseInProgress: activeOperation == .rebase,
             activeOperation: activeOperation,
-            fastForwardReferenceIDs: fastForwardReferenceIDs,
+            fastForwardReferenceIDs: fastForwardReferences.targets,
+            branchesBehindHeadIDs: fastForwardReferences.branchesBehindHead,
             historyOffset: historyResult.nextOffset,
             graphHasMore: historyResult.hasMore,
             graphLayoutState: historyResult.layoutState,
@@ -1252,10 +1268,10 @@ struct GitClient: Sendable {
             )
         }
         let fastForwardTask = Task.detached(priority: .userInitiated) {
-            status.headHash == nil ? Set<String>() : self.fastForwardReferenceIDs()
+            status.headHash == nil ? .none : self.fastForwardReferences()
         }
         let historyResult = try await historyTask.value
-        let fastForwardReferenceIDs = await fastForwardTask.value
+        let fastForwardReferences = await fastForwardTask.value
         try Task.checkCancellation()
 
         return RepositorySnapshot(
@@ -1272,7 +1288,8 @@ struct GitClient: Sendable {
             hasUpstream: status.hasUpstream && upstream != nil,
             isRebaseInProgress: activeOperation == .rebase,
             activeOperation: activeOperation,
-            fastForwardReferenceIDs: fastForwardReferenceIDs,
+            fastForwardReferenceIDs: fastForwardReferences.targets,
+            branchesBehindHeadIDs: fastForwardReferences.branchesBehindHead,
             historyOffset: historyResult.nextOffset,
             graphHasMore: historyResult.hasMore,
             graphLayoutState: historyResult.layoutState,
@@ -2041,15 +2058,48 @@ struct GitClient: Sendable {
         try Self.parseRemotes(run(["remote", "-v"]))
     }
 
-    /// Local worktrees only: an SSH repository's worktree paths are on the
-    /// remote host.
     func worktrees() throws -> [GitWorktree] {
-        guard sshRepository == nil else { return [] }
-        return Self.parseWorktrees(try run(["worktree", "list", "--porcelain"]))
+        // Most repositories have no linked worktrees, and Git keeps a
+        // `worktrees` folder in the main `.git` folder once they do. Skip the
+        // Git process until then.
+        if sshRepository == nil {
+            let gitURL = repositoryURL.appendingPathComponent(".git", isDirectory: true)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: gitURL.path, isDirectory: &isDirectory),
+               isDirectory.boolValue,
+               !FileManager.default.fileExists(
+                   atPath: gitURL.appendingPathComponent("worktrees").path
+               ) {
+                return []
+            }
+        }
+        return Self.parseWorktrees(
+            try run(["worktree", "list", "--porcelain"]),
+            sshHost: sshRepository?.host
+        )
+    }
+
+    /// Checks out `branch` in a new worktree at `path`, creating the branch
+    /// from HEAD when it does not exist yet.
+    func addWorktree(path: String, branch: String) throws {
+        let branchName = try validatedBranchName(branch)
+        let branchExists = (try? run([
+            "rev-parse", "--verify", "--quiet", "refs/heads/\(branchName)"
+        ])) != nil
+        _ = try run(
+            branchExists
+                ? ["worktree", "add", "--", path, branchName]
+                : ["worktree", "add", "-b", branchName, "--", path]
+        )
+    }
+
+    /// Git refuses to remove a worktree with changes unless forced.
+    func removeWorktree(path: String, force: Bool = false) throws {
+        _ = try run(["worktree", "remove"] + (force ? ["--force"] : []) + ["--", path])
     }
 
     /// Skips bare entries and worktrees whose folder is gone.
-    static func parseWorktrees(_ output: String) -> [GitWorktree] {
+    static func parseWorktrees(_ output: String, sshHost: String? = nil) -> [GitWorktree] {
         output.components(separatedBy: "\n\n").compactMap { block in
             var path: String?
             var branch: String?
@@ -2061,7 +2111,7 @@ struct GitClient: Sendable {
                     branch = String(line.dropFirst("branch refs/heads/".count))
                 }
             }
-            return path.map { GitWorktree(path: $0, branch: branch) }
+            return path.map { GitWorktree(path: $0, branch: branch, sshHost: sshHost) }
         }
     }
 
@@ -2593,6 +2643,26 @@ struct GitClient: Sendable {
             }
             throw error
         }
+    }
+
+    /// Moves a branch that no worktree has checked out forward to `hash`.
+    func fastForwardBranch(_ branch: GitReference, to hash: String) throws {
+        let branchName = try validatedBranchName(branch.name)
+        guard !(try worktrees().contains { $0.branch == branchName }) else {
+            throw manualIntegrationError(
+                "\(branch.name) is checked out in a worktree. Fast-forward it there."
+            )
+        }
+        let branchHash = try resolvedReferenceHash(branch)
+        guard try isAncestor(branchHash, of: hash) else {
+            throw manualIntegrationError(
+                "A fast-forward is not available because the branches have diverged."
+            )
+        }
+        // The old hash makes Git refuse if the branch moved in the meantime.
+        _ = try run([
+            "update-ref", "-m", "fast-forward", "refs/heads/\(branchName)", hash, branchHash
+        ])
     }
 
     func createBranch(
@@ -3298,6 +3368,43 @@ struct GitClient: Sendable {
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return mergeBase == ancestor
+    }
+
+    /// One pass over the branches instead of a `--contains` and a
+    /// `--merged` query. Git before 2.41 has no `ahead-behind` atom, so fall
+    /// back to finding only the fast-forward targets.
+    private func fastForwardReferences() -> FastForwardReferences {
+        guard let output = try? run([
+            "for-each-ref",
+            "--format=%(refname)%09%(ahead-behind:HEAD)",
+            "refs/heads",
+            "refs/remotes"
+        ]) else {
+            return FastForwardReferences(
+                targets: fastForwardReferenceIDs(),
+                branchesBehindHead: []
+            )
+        }
+        return Self.parseFastForwardReferences(output)
+    }
+
+    /// Each line is a ref name, then how many commits it has that HEAD does
+    /// not and how many HEAD has that it does not.
+    static func parseFastForwardReferences(_ output: String) -> FastForwardReferences {
+        var result = FastForwardReferences.none
+        for line in output.split(whereSeparator: \.isNewline) {
+            let fields = line.split(separator: "\t")
+            guard fields.count == 2 else { continue }
+            let counts = fields[1].split(separator: " ").compactMap { Int($0) }
+            guard counts.count == 2 else { continue }
+            let name = String(fields[0])
+            if counts[1] == 0 {
+                result.targets.insert(name)
+            } else if counts[0] == 0, name.hasPrefix("refs/heads/") {
+                result.branchesBehindHead.insert(name)
+            }
+        }
+        return result
     }
 
     private func fastForwardReferenceIDs() -> Set<String> {

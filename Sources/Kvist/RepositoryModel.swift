@@ -135,6 +135,7 @@ final class RepositoryModel: ObservableObject {
     @Published private(set) var remotes: [GitRemote] = []
     @Published private(set) var worktrees: [GitWorktree] = []
     @Published private(set) var fastForwardReferenceIDs: Set<String> = []
+    @Published private(set) var branchesBehindHeadIDs: Set<String> = []
     @Published private(set) var graphScope: GraphScope = .all
     @Published private(set) var isLoadingMoreGraph = false
     @Published private(set) var workspaceMode: RepositoryWorkspaceMode = .sourceControl
@@ -276,6 +277,8 @@ final class RepositoryModel: ObservableObject {
     private let mutationQueue = RepositoryMutationQueue()
     private let gitPreviewDirectoryStore = GitFilePreviewDirectoryStore()
     var restorationStateDidChange: (() -> Void)?
+    /// Set by the workspace to show another worktree of this repository.
+    var switchToWorktree: ((GitWorktree) -> Void)?
 
     init(
         initialRepositoryURL: URL? = nil,
@@ -3212,7 +3215,13 @@ final class RepositoryModel: ObservableObject {
 
     @discardableResult
     func checkout(_ reference: GitReference) async -> Bool {
-        await perform("Checking out \(reference.name)…") {
+        // Git refuses to check out a branch that another worktree has
+        // checked out, so go to that worktree instead.
+        if let worktree = otherWorktree(checkingOut: reference) {
+            switchToWorktree?(worktree)
+            return true
+        }
+        return await perform("Checking out \(reference.name)…") {
             try $0.checkout(reference: reference)
         }
     }
@@ -3221,9 +3230,43 @@ final class RepositoryModel: ObservableObject {
         fastForwardReferenceIDs.contains(reference.id)
     }
 
+    /// Whether the branch can move forward to HEAD without checking it out,
+    /// for example main after rebasing the current branch onto it.
+    func canFastForwardToHead(_ reference: GitReference) -> Bool {
+        branchesBehindHeadIDs.contains(reference.id)
+    }
+
+    @discardableResult
+    func fastForwardToHead(_ branch: GitReference) async -> Bool {
+        guard let headHash else { return false }
+        let message = "Fast-forwarding \(branch.name) to \(self.branch)…"
+        guard let worktree = otherWorktree(checkingOut: branch) else {
+            return await perform(message) {
+                try $0.fastForwardBranch(branch, to: headHash)
+            }
+        }
+        // Merge in that worktree so its files move with the branch.
+        guard let current = references.first(where: { $0.isHead && $0.kind == .localBranch }) else {
+            return false
+        }
+        return await perform(in: worktree, message) {
+            try $0.integrate(current, strategy: .fastForward)
+        }
+    }
+
     @discardableResult
     func rebase(_ branch: GitReference, onto base: GitReference) async -> Bool {
-        await perform("Rebasing \(branch.name) onto \(base.name)…") {
+        guard let worktree = otherWorktree(checkingOut: branch) else {
+            return await perform("Rebasing \(branch.name) onto \(base.name)…") {
+                try $0.rebase(branch, onto: base)
+            }
+        }
+        // Rebasing checks the branch out first, which only its own worktree
+        // can do.
+        return await perform(
+            in: worktree,
+            "Rebasing \(branch.name) onto \(base.name) in \(worktree.name)…"
+        ) {
             try $0.rebase(branch, onto: base)
         }
     }
@@ -3968,6 +4011,9 @@ final class RepositoryModel: ObservableObject {
         if fastForwardReferenceIDs != snapshot.fastForwardReferenceIDs {
             fastForwardReferenceIDs = snapshot.fastForwardReferenceIDs
         }
+        if branchesBehindHeadIDs != snapshot.branchesBehindHeadIDs {
+            branchesBehindHeadIDs = snapshot.branchesBehindHeadIDs
+        }
         graphHistoryOffset = snapshot.historyOffset
         graphHasMore = snapshot.graphHasMore
         graphLayoutState = snapshot.graphLayoutState
@@ -3979,6 +4025,138 @@ final class RepositoryModel: ObservableObject {
         )
 
         closeDiffPanelIfSelectionWasRemoved()
+    }
+
+    /// The other worktree that has the branch checked out, if any.
+    func otherWorktree(checkingOut reference: GitReference) -> GitWorktree? {
+        guard reference.kind == .localBranch else { return nil }
+        return worktrees.first { $0.branch == reference.name && !isCurrentWorktree($0) }
+    }
+
+    /// Where a new worktree goes when the user leaves the folder empty: next
+    /// to the main worktree, named after the repository and the branch.
+    func defaultWorktreePath(for branch: String) -> String {
+        let mainPath = worktrees.first?.path ?? sshRepository?.path ?? repositoryURL?.path ?? ""
+        let folder = (mainPath as NSString).lastPathComponent + "-"
+            + branch.replacingOccurrences(of: "/", with: "-")
+        return ((mainPath as NSString).deletingLastPathComponent as NSString)
+            .appendingPathComponent(folder)
+    }
+
+    /// Creates the worktree and returns it so the caller can open it.
+    func addWorktree(branch: String, path: String) async -> GitWorktree? {
+        let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        var path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.isEmpty {
+            path = defaultWorktreePath(for: branch)
+        } else if sshRepository == nil {
+            path = (path as NSString).expandingTildeInPath
+        }
+        if !path.hasPrefix("/"),
+           let currentPath = sshRepository?.path ?? repositoryURL?.path {
+            path = (currentPath as NSString).appendingPathComponent(path)
+        }
+        guard await perform("Creating worktree for \(branch)…", operation: { [path] in
+            try $0.addWorktree(path: path, branch: branch)
+        }) else { return nil }
+        return worktrees.first { $0.branch == branch }
+    }
+
+    /// Removes another worktree's folder. The branch stays.
+    func removeWorktree(_ worktree: GitWorktree) async -> Bool {
+        // Run from a worktree that stays, since this one may be the one
+        // removed.
+        guard let base = worktrees.first(where: { $0.path != worktree.path }) else {
+            return false
+        }
+        let isRemovingCurrent = isCurrentWorktree(worktree)
+        do {
+            do {
+                try await run(in: base, "Removing \(worktree.name)…") {
+                    try $0.removeWorktree(path: worktree.path)
+                }
+            } catch let error as GitCommandError where error.output.contains("--force") {
+                let result = AppDialog.run(
+                    title: "Remove Worktree with Changes?",
+                    message: "\(worktree.name) has modified or untracked files. Removing it deletes them. This cannot be undone by Kvist.",
+                    actions: [
+                        AppDialogAction(title: "Cancel", role: .cancel),
+                        AppDialogAction(title: "Remove with Changes", role: .destructive)
+                    ]
+                )
+                guard result.actionIndex == 1 else { return false }
+                try await run(in: base, "Removing \(worktree.name)…") {
+                    try $0.removeWorktree(path: worktree.path, force: true)
+                }
+            }
+        } catch is CancellationError {
+            return false
+        } catch {
+            present(error)
+            return false
+        }
+        if !isRemovingCurrent {
+            await refresh()
+        }
+        return true
+    }
+
+    /// Runs a Git operation in another worktree of this repository, then
+    /// refreshes this one, which shares that worktree's branches.
+    private func perform(
+        in worktree: GitWorktree,
+        _ message: String,
+        operation: @escaping @Sendable (GitClient) throws -> Void
+    ) async -> Bool {
+        do {
+            try await run(in: worktree, message, operation: operation)
+            await refresh()
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            await refresh()
+            if (error as? GitCommandError)?.rebaseConflictPresentation != nil {
+                // The operation paused in that worktree, so resolve it there.
+                switchToWorktree?(worktree)
+            } else {
+                present(error)
+            }
+            return false
+        }
+    }
+
+    /// Throws `CancellationError` without running when this repository is
+    /// busy.
+    private func run(
+        in worktree: GitWorktree,
+        _ message: String,
+        operation: @escaping @Sendable (GitClient) throws -> Void
+    ) async throws {
+        guard let repositoryURL,
+              !isBusy,
+              !isSavingRepositoryFile,
+              !isGeneratingCommitMessage else { throw CancellationError() }
+        let client = GitClient(
+            repositoryURL: worktree.sshHost == nil ? worktree.url : repositoryURL,
+            sshRepository: try worktree.sshHost.map {
+                try SSHRepository(host: $0, path: worktree.path)
+            }
+        )
+        isBusy = true
+        activity = message
+        defer { isBusy = false }
+        try await Task.detached(priority: .userInitiated) {
+            try operation(client)
+        }.value
+    }
+
+    func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
+        if let sshRepository {
+            return worktree.path == sshRepository.path
+        }
+        return worktree.url.standardizedFileURL.path
+            == repositoryURL?.standardizedFileURL.path
     }
 
     private func applyRepositoryMetadata(

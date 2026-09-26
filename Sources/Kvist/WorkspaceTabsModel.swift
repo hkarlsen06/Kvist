@@ -72,6 +72,18 @@ final class RepositoryTab: ObservableObject, Identifiable {
         return result.actionIndex == 1
     }
 
+    fileprivate func shows(_ worktree: GitWorktree) -> Bool {
+        guard let repositoryPath else { return false }
+        guard let sshHost = worktree.sshHost else {
+            return repositoryPath == worktree.url.standardizedFileURL.path
+        }
+        // An SSH tab's path is its local mirror, so compare the remote
+        // location recorded in the mirror.
+        let remote = storedModel?.sshRepository
+            ?? SSHRepository.mirrored(at: URL(fileURLWithPath: repositoryPath, isDirectory: true))
+        return remote?.host == sshHost && remote?.path == worktree.path
+    }
+
     var repositoryURL: URL? {
         storedModel?.repositoryURL ?? repositoryPath.map {
             URL(fileURLWithPath: $0, isDirectory: true)
@@ -411,17 +423,37 @@ final class WorkspaceTabsModel: ObservableObject {
     /// Selects the tab that shows the worktree, or opens it in a new tab
     /// after the active one so each worktree keeps its own drafts and panels.
     func switchToWorktree(_ worktree: GitWorktree) {
-        let path = worktree.url.standardizedFileURL.path
-        if let tab = tabs.first(where: { $0.repositoryPath == path }) {
-            select(tab.id)
+        if let existingTab = tabs.first(where: { $0.shows(worktree) }) {
+            select(existingTab.id)
             return
         }
-        let tab = RepositoryTab(repositoryURL: worktree.url)
+        let tab = RepositoryTab(repositoryURL: worktree.sshHost == nil ? worktree.url : nil)
         let index = tabs.firstIndex(where: { $0.id == activeTabID }) ?? tabs.count - 1
         tabs.insert(tab, at: index + 1)
         observeRepository(tab)
         activeTabID = tab.id
         persistTabs()
+        if let sshHost = worktree.sshHost {
+            Task { await tab.model.openSSHRepository(host: sshHost, path: worktree.path) }
+        }
+    }
+
+    /// Removes a worktree of the active repository and closes its tabs,
+    /// moving to another worktree first if the active tab shows it.
+    func removeWorktree(_ worktree: GitWorktree) {
+        let model = activeModel
+        let affectedTabs = tabs.filter { $0.shows(worktree) }
+        guard affectedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
+        Task {
+            guard await model.removeWorktree(worktree) else { return }
+            if affectedTabs.contains(where: { $0.id == activeTabID }),
+               let remaining = model.worktrees.first(where: { $0.path != worktree.path }) {
+                switchToWorktree(remaining)
+            }
+            for tab in affectedTabs {
+                close(tab.id, confirmingDiscard: false)
+            }
+        }
     }
 
     func select(_ tabID: UUID) {
@@ -457,9 +489,9 @@ final class WorkspaceTabsModel: ObservableObject {
         persistTabs()
     }
 
-    func close(_ tabID: UUID) {
+    func close(_ tabID: UUID, confirmingDiscard: Bool = true) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        guard tabs[index].confirmDiscardChanges() else { return }
+        guard !confirmingDiscard || tabs[index].confirmDiscardChanges() else { return }
         tabs[index].deactivate(isClosing: true)
         repositorySubscriptions[tabID] = nil
         let closedTab = tabs.remove(at: index)
@@ -593,6 +625,7 @@ final class WorkspaceTabsModel: ObservableObject {
     }
 
     private func observeRepositoryModel(_ model: RepositoryModel, for tab: RepositoryTab) {
+        model.switchToWorktree = { [weak self] in self?.switchToWorktree($0) }
         repositorySubscriptions[tab.id] = model.$repositoryURL
             .dropFirst()
             .sink { [weak self, weak tab] repositoryURL in

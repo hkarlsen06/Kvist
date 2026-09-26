@@ -197,10 +197,7 @@ struct ContentView: View {
 
             ActiveRepositoryView(tab: tabsModel.activeTab)
 
-            RepositoryStatusBar(
-                tab: tabsModel.activeTab,
-                switchToWorktree: tabsModel.switchToWorktree
-            )
+            RepositoryStatusBar(tab: tabsModel.activeTab)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.canvas)
@@ -209,15 +206,95 @@ struct ContentView: View {
     }
 }
 
+/// A worktree is another folder with its own checked-out branch, so this
+/// menu sits beside the branch menu. It switches, creates, and removes
+/// worktrees. The tab title already names the current worktree, so the
+/// label is only the glyph and leaves room for rebase and merge controls.
+private struct RepositoryWorktreeMenu: View {
+    @ObservedObject var model: RepositoryModel
+    @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+
+    var body: some View {
+        Menu {
+            // Empty until the repository has a linked worktree.
+            if !model.worktrees.isEmpty {
+                Section("Worktrees") {
+                    ForEach(model.worktrees) { worktree in
+                        Button {
+                            tabsModel.switchToWorktree(worktree)
+                        } label: {
+                            if model.isCurrentWorktree(worktree) {
+                                Label(title(of: worktree), systemImage: "checkmark")
+                            } else {
+                                Text(title(of: worktree))
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+            }
+
+            Button("New Worktree…") {
+                guard let input = GitPrompt.newWorktree(
+                    defaultPath: model.defaultWorktreePath(for: "branch")
+                ) else { return }
+                Task {
+                    if let worktree = await model.addWorktree(
+                        branch: input.branch,
+                        path: input.path
+                    ) {
+                        tabsModel.switchToWorktree(worktree)
+                    }
+                }
+            }
+            .disabled(model.headHash == nil)
+
+            Menu("Remove Worktree") {
+                ForEach(removableWorktrees) { worktree in
+                    Button(title(of: worktree)) {
+                        guard GitPrompt.confirmRemoveWorktree(worktree) else { return }
+                        tabsModel.removeWorktree(worktree)
+                    }
+                }
+            }
+            .disabled(removableWorktrees.isEmpty)
+        } label: {
+            CodiconGlyph(icon: .worktree, size: 14, color: AppTheme.primary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .tint(AppTheme.primary)
+        .help("Worktree: \(currentName)")
+        .accessibilityLabel("Worktrees. Current worktree: \(currentName)")
+    }
+
+    private func title(of worktree: GitWorktree) -> String {
+        "\(worktree.name) (\(worktree.branch ?? "detached HEAD"))"
+    }
+
+    private var currentName: String {
+        model.worktrees.first(where: model.isCurrentWorktree)?.name
+            ?? model.repositoryURL?.lastPathComponent
+            ?? ""
+    }
+
+    /// Git lists the main worktree first, and it cannot be removed.
+    private var removableWorktrees: [GitWorktree] {
+        Array(model.worktrees.dropFirst())
+    }
+}
+
 private struct RepositoryStatusBar: View {
     @ObservedObject private var tab: RepositoryTab
     @ObservedObject var model: RepositoryModel
-    let switchToWorktree: (GitWorktree) -> Void
 
-    init(tab: RepositoryTab, switchToWorktree: @escaping (GitWorktree) -> Void) {
+    init(tab: RepositoryTab) {
         _tab = ObservedObject(wrappedValue: tab)
         _model = ObservedObject(wrappedValue: tab.model)
-        self.switchToWorktree = switchToWorktree
     }
 
     var body: some View {
@@ -234,6 +311,10 @@ private struct RepositoryStatusBar: View {
                 }
             } else if model.repositoryURL != nil {
                 branchMenu
+
+                RepositoryWorktreeMenu(model: model)
+                    .padding(.leading, 12)
+                    .disabled(branchMenuDisabled)
 
                 Spacer(minLength: 0)
 
@@ -336,16 +417,6 @@ private struct RepositoryStatusBar: View {
 
             Divider()
 
-            // A worktree is another folder with its own checked-out branch,
-            // so switching between them sits beside checking out branches.
-            if model.worktrees.count > 1 {
-                Section("Worktrees") {
-                    ForEach(model.worktrees) { worktree in
-                        worktreeMenuItem(worktree)
-                    }
-                }
-            }
-
             if localBranches.isEmpty && remoteBranches.isEmpty {
                 Text(model.repositoryURL == nil ? "Open a repository first" : "No branches")
             } else {
@@ -382,44 +453,19 @@ private struct RepositoryStatusBar: View {
         .tint(AppTheme.primary)
         .help("Checkout Branch…")
         .accessibilityLabel("Current branch: \(branchLabel)")
-        .disabled(
-            model.repositoryURL == nil
-                || model.isBusy
-                || model.isGeneratingCommitMessage
-                || model.hasPendingChangeOperations
-        )
+        .disabled(branchMenuDisabled)
     }
 
-    private func worktreeMenuItem(_ worktree: GitWorktree) -> some View {
-        let title = "\(worktree.url.lastPathComponent) (\(worktree.branch ?? "detached HEAD"))"
-        return Button {
-            switchToWorktree(worktree)
-        } label: {
-            if isCurrentWorktree(worktree) {
-                Label(title, systemImage: "checkmark")
-            } else {
-                Text(title)
-            }
-        }
-        .help(worktree.path)
-    }
-
-    private func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
-        worktree.url.standardizedFileURL.path == model.repositoryURL?.standardizedFileURL.path
+    private var branchMenuDisabled: Bool {
+        model.repositoryURL == nil
+            || model.isBusy
+            || model.isGeneratingCommitMessage
+            || model.hasPendingChangeOperations
     }
 
     private func branchMenuItem(_ reference: GitReference) -> some View {
         Button {
-            // Git refuses to check out a branch that another worktree has
-            // checked out, so go to that worktree instead.
-            if reference.kind == .localBranch,
-               let worktree = model.worktrees.first(where: {
-                   $0.branch == reference.name && !isCurrentWorktree($0)
-               }) {
-                switchToWorktree(worktree)
-            } else {
-                Task { await model.checkout(reference) }
-            }
+            Task { await model.checkout(reference) }
         } label: {
             if reference.isHead {
                 Label(reference.name, systemImage: "checkmark")
@@ -6598,6 +6644,42 @@ private enum GitPrompt {
         return (name, message.isEmpty ? nil : message)
     }
 
+    static func newWorktree(defaultPath: String) -> (branch: String, path: String)? {
+        let result = AppDialog.run(
+            title: "New Worktree",
+            message: "Check out a branch in its own folder. Kvist creates the branch from the current HEAD if it does not exist.",
+            fields: [
+                AppDialogField(label: "Branch", placeholder: "Branch name"),
+                AppDialogField(
+                    label: "Folder",
+                    placeholder: "Optional. Defaults to \(defaultPath)",
+                    isRequired: false
+                )
+            ],
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(title: "Create Worktree", role: .primary)
+            ]
+        )
+        guard result.actionIndex == 1,
+              result.values.count == 2,
+              !result.values[0].isEmpty else { return nil }
+        return (result.values[0], result.values[1])
+    }
+
+    static func confirmRemoveWorktree(_ worktree: GitWorktree) -> Bool {
+        let branch = worktree.branch.map { " The branch \"\($0)\" stays." } ?? ""
+        let result = AppDialog.run(
+            title: "Remove Worktree?",
+            message: "Delete the folder \(worktree.path) and close its tabs.\(branch)",
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(title: "Remove Worktree", role: .destructive)
+            ]
+        )
+        return result.actionIndex == 1
+    }
+
     static func confirmDelete(kind: String, name: String) -> Bool {
         let result = AppDialog.run(
             title: "Delete \(kind.capitalized)?",
@@ -7002,7 +7084,14 @@ private struct ReferenceContextMenuItems: View {
 
     @ViewBuilder
     private var mergeIntoCurrentButton: some View {
-        if model.canFastForward(to: reference) {
+        if model.canFastForwardToHead(reference) {
+            // Merging would change nothing, but the branch can catch up to
+            // HEAD without checking it out.
+            Button("Fast-Forward \"\(reference.name)\" to \"\(model.branch)\"") {
+                Task { await model.fastForwardToHead(reference) }
+            }
+            .disabled(operationsDisabled)
+        } else if model.canFastForward(to: reference) {
             Button("Fast-Forward \"\(model.branch)\" to \"\(reference.name)\"") {
                 Task {
                     await model.integrate(
