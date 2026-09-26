@@ -2344,6 +2344,7 @@ final class SSHScriptTransportTests: XCTestCase {
     /// Kvist's script on standard input.
     private func runAsLoginShell(
         _ loginShell: String,
+        commandShell: String = "/bin/sh",
         greeting: String? = nil,
         input: String
     ) throws -> (status: Int32, output: Data) {
@@ -2351,7 +2352,7 @@ final class SSHScriptTransportTests: XCTestCase {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: loginShell)
-        process.arguments = ["-c", (greeting.map { "echo \($0); " } ?? "") + "/bin/sh"]
+        process.arguments = ["-c", (greeting.map { "echo \($0); " } ?? "") + commandShell]
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         try process.run()
@@ -2412,5 +2413,24 @@ final class SSHScriptTransportTests: XCTestCase {
     func testExitStatusOfTheScriptReachesSSH() throws {
         let result = try runAsLoginShell("/bin/sh", input: SSHConnection.scriptInput("exit 3"))
         XCTAssertEqual(result.status, 3)
+    }
+
+    func testPromptReachesCommandWhenRemoteShellReadsAhead() throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/bin/dash"))
+        let prompt = "User's instructions\n$(printf injected) `printf injected` %s \\ literal"
+        let repository = try SSHRepository(host: "example.com", path: "/")
+        let command = AICommitMessageGenerator.remoteShellScript(
+            for: repository,
+            command: "cat; exit 3",
+            inLoginShell: true
+        )
+        let result = try runAsLoginShell(
+            "/bin/sh",
+            commandShell: "/bin/dash",
+            input: SSHConnection.scriptInput(command, followedBy: prompt)
+        )
+
+        XCTAssertEqual(result.status, 3)
+        XCTAssertEqual(SSHConnection.outputAfterMarker(result.output), Data(prompt.utf8))
     }
 }

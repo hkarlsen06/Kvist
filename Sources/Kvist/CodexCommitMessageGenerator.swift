@@ -298,9 +298,9 @@ struct AICommitMessageGenerator: Sendable {
         return "cd \(shellQuote(repository.path)) && \(remoteCommand)"
     }
 
-    /// Runs `command` in the repository on the SSH host. The script goes on
-    /// standard input ahead of `input`, so the host's login shell never
-    /// parses it (see `SSHConnection.scriptInput`).
+    /// Runs `command` in the repository on the SSH host. `scriptInput` sends
+    /// the script and quoted input through `/bin/sh`, so the host's login
+    /// shell never parses them.
     static func runRemote(
         in repository: SSHRepository,
         command: String,

@@ -75,18 +75,19 @@ enum SSHConnection {
     /// greeting writes it before this, and `outputAfterMarker` drops it.
     static let outputMarker = "\u{1}KVIST-SSH-OUTPUT\u{1}"
 
-    /// Standard input for `shellArguments`. The shell parses the whole
-    /// `{ … }` group before running it, and `exit` on the same line ends it
-    /// before it could read `input` as more script. Commands in the script
-    /// read `input`, or nothing when it is nil.
+    /// Standard input for `shellArguments`. Pipe quoted input into the command
+    /// group so shells such as dash cannot consume it while reading the script.
+    /// Commands read nothing when input is nil.
     static func scriptInput(
         _ script: String,
         followedBy input: String? = nil,
         marksOutput: Bool = true
     ) -> String {
         let marker = marksOutput ? "printf '\\001KVIST-SSH-OUTPUT\\001'\n" : ""
-        let redirect = input == nil ? " </dev/null" : ""
-        return marker + "{\n\(script)\n}\(redirect); exit\n" + (input ?? "")
+        if let input {
+            return marker + "printf %s \(shellQuote(input)) | {\n\(script)\n}; exit\n"
+        }
+        return marker + "{\n\(script)\n} </dev/null; exit\n"
     }
 
     /// Drops anything the login shell printed before the script's marker.
