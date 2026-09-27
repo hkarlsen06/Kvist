@@ -2,6 +2,8 @@
 
 After changes affecting the runnable app, build and install the newest build to /Applications. Documentation-only or instruction-only edits do not require a rebuild or install.
 
+When cutting a release, do not install the release build to /Applications. The installed copy stays on the previous version so the user can test that Kvist finds, shows, and installs the new release through its in-app updater once the release is published.
+
 ## Modal dialogs
 
 Use `AppDialog` (`NSAlert`) for prompts and confirmations, and `NSOpenPanel` or
