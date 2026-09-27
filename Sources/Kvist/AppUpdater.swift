@@ -48,6 +48,7 @@ enum AppUpdater {
         case checksumMismatch
         case extractionFailed
         case invalidSignature
+        case localBuild
         case unexpectedVersion
         case rateLimited
         case operationInProgress
@@ -63,7 +64,9 @@ enum AppUpdater {
             case .extractionFailed:
                 "The downloaded archive could not be extracted."
             case .invalidSignature:
-                "The downloaded app is not signed by the Kvist developer. Local development builds cannot update themselves."
+                "The downloaded app is not signed by the Kvist developer."
+            case .localBuild:
+                "This copy of Kvist is a local development build, which cannot update itself. Download the release from GitHub instead."
             case .unexpectedVersion:
                 "The downloaded app has a different version than the release."
             case .rateLimited:
@@ -199,6 +202,7 @@ enum AppUpdater {
         guard !bundleURL.path.contains("/AppTranslocation/") else {
             throw UpdateError.translocated
         }
+        guard isDeveloperIDSigned else { throw UpdateError.localBuild }
         guard let asset = release.archive else { throw UpdateError.badResponse }
         let (archiveURL, response) = try await URLSession.shared.download(
             from: asset.browserDownloadUrl
@@ -246,6 +250,21 @@ enum AppUpdater {
         try? FileManager.default.removeItem(at: workURL)
         isRelaunching = true
         NSApp.terminate(nil)
+    }
+
+    /// Ad-hoc and unsigned builds have no team identifier. Their designated
+    /// requirement matches only their own code hash, so no release passes it.
+    private static var isDeveloperIDSigned: Bool {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(
+                  staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info
+              ) == errSecSuccess,
+              let info = info as? [String: Any] else { return false }
+        return info[kSecCodeInfoTeamIdentifier as String] != nil
     }
 
     private nonisolated static func prepare(
