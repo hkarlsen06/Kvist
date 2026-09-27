@@ -158,13 +158,13 @@ struct KvistApp: App {
                     tabsModel.selectNext()
                 }
                 .keyboardShortcut("]", modifiers: [.command, .shift])
-                .disabled(tabsModel.tabs.count < 2)
+                .disabled(tabsModel.topLevelTabs.count < 2)
 
                 Button("Show Previous Tab") {
                     tabsModel.selectPrevious()
                 }
                 .keyboardShortcut("[", modifiers: [.command, .shift])
-                .disabled(tabsModel.tabs.count < 2)
+                .disabled(tabsModel.topLevelTabs.count < 2)
             }
 
             CommandGroup(after: .newItem) {

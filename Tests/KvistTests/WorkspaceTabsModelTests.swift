@@ -525,6 +525,59 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: linkedURL.path))
     }
 
+    func testWorktreeTabsShareOneTopLevelEntryThatMovesClosesAndRestoresTogether() async throws {
+        let mainURL = try temporaryDirectory()
+        let linkedURL = mainURL.deletingLastPathComponent()
+            .appendingPathComponent(mainURL.lastPathComponent + "-linked", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: mainURL)
+            try? FileManager.default.removeItem(at: linkedURL)
+        }
+        try GitClient.initializeRepository(at: mainURL, createGitIgnore: false)
+        let client = GitClient(repositoryURL: mainURL)
+        _ = try client.run([
+            "-c", "user.name=Kvist Test", "-c", "user.email=kvist@example.invalid",
+            "commit", "--allow-empty", "-m", "Initial"
+        ])
+        try client.addWorktree(path: linkedURL.path, branch: "feature")
+        let defaults = isolatedDefaults()
+        let tabsModel = WorkspaceTabsModel(
+            defaults: defaults,
+            restoredRepositoryURLs: [mainURL]
+        )
+        let mainTab = tabsModel.activeTab
+        await waitForRepositoryLoad(in: mainTab)
+        XCTAssertEqual(mainTab.worktrees.count, 2)
+        let linked = try XCTUnwrap(mainTab.worktrees.first { $0.branch == "feature" })
+
+        tabsModel.switchToWorktree(linked)
+        let linkedTab = tabsModel.activeTab
+        XCTAssertEqual(tabsModel.tabs.count, 2)
+        XCTAssertEqual(tabsModel.topLevelTabs.map(\.id), [linkedTab.id])
+
+        // The group's entry keeps showing the worktree it was last on.
+        tabsModel.addTab()
+        let otherTabID = tabsModel.activeTabID
+        XCTAssertEqual(tabsModel.topLevelTabs.map(\.id), [linkedTab.id, otherTabID])
+        tabsModel.selectPrevious()
+        XCTAssertEqual(tabsModel.activeTabID, linkedTab.id)
+
+        tabsModel.moveTab(linkedTab.id, toIndex: 1)
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [otherTabID, mainTab.id, linkedTab.id])
+
+        // Restored tabs group from the saved worktree list before loading.
+        tabsModel.prepareForTermination()
+        let restored = WorkspaceTabsModel(
+            defaults: defaults,
+            automaticallyActivatesInitialTab: false
+        )
+        XCTAssertEqual(restored.tabs.count, 3)
+        XCTAssertEqual(restored.topLevelTabs.count, 2)
+
+        tabsModel.close(linkedTab.id)
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [otherTabID])
+    }
+
     func testCloseOthersKeepsOnlyTheGivenTab() {
         let tabsModel = WorkspaceTabsModel(
             defaults: isolatedDefaults(),

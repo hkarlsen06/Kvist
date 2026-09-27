@@ -43,7 +43,8 @@ Semibold is reserved for section hierarchy and the HEAD commit subject.
 - Dense rows: 28 to 33 points
 - No app toolbar, source-control title label, or permanent wide detail pane.
 - A native Git/Files mode picker shares the repository tab strip.
-- A 34-point bottom status strip, matching the top bar, keeps the branch, active operation, and sync state visible. An icon-only worktree menu with the Codicons worktree glyph follows the branch menu. The tab title already names the worktree, so the strip keeps its width for rebase and merge controls.
+- A 30-point worktree row under the tab row, on the canvas color, lists the active repository's worktrees by branch, with a right-aligned New Worktree button. Git checks a branch out in only one worktree, so the branch is enough to tell them apart. The folder path is in the tooltip, and a worktree on a detached HEAD shows its folder name instead. The tab row has one tab per repository, named after its main worktree, and the row switches between that repository's worktrees.
+- A 34-point bottom status strip, matching the top bar, keeps the branch, active operation, and sync state visible.
 - A selected change or repository file may temporarily reveal an editor-style panel on the right, defaulting to the same width as the repository sidebar; dragging the divider resizes both panes proportionally and preserves that ratio across window sizes and launches. The window expands around its horizontal center without changing height, and Escape dismisses the panel.
 - Native macOS traffic-light controls remain visible in the top-left title strip.
 

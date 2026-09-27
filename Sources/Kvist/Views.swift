@@ -25,6 +25,13 @@ enum AppTheme {
         let isDark = ColorMath.luminance(palette.canvas) < 0.5
         return Color(hex: ColorMath.mix(palette.canvas, 0x000000, isDark ? 0.28 : 0.10))
     }
+    /// Hairline around the active tab and along the strip's bottom edge.
+    /// Near-black canvases leave almost no room for a darker strip, so this
+    /// line, not the fill, is what separates the active tab from the rest.
+    /// Mixing toward the text color keeps it visible in light and dark themes.
+    static var tabOutline: Color {
+        Color(hex: ColorMath.mix(palette.canvas, palette.primary, 0.16))
+    }
     static var selection: Color { Color(hex: palette.selection).opacity(0.26) }
     static var selectionNSColor: NSColor {
         NSColor(hex: palette.selection).withAlphaComponent(0.26)
@@ -195,6 +202,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             RepositoryTopBar()
 
+            RepositoryWorktreeBar(tab: tabsModel.activeTab)
+
             ActiveRepositoryView(tab: tabsModel.activeTab)
 
             RepositoryStatusBar(tab: tabsModel.activeTab)
@@ -206,85 +215,234 @@ struct ContentView: View {
     }
 }
 
-/// A worktree is another folder with its own checked-out branch, so this
-/// menu sits beside the branch menu. It switches, creates, and removes
-/// worktrees. The tab title already names the current worktree, so the
-/// label is only the glyph and leaves room for rebase and merge controls.
-private struct RepositoryWorktreeMenu: View {
-    @ObservedObject var model: RepositoryModel
+/// The active repository's worktrees, under the tab row. A worktree is
+/// another folder with its own checked-out branch. Each one opens in its own
+/// tab so it keeps its own drafts and panels, and those tabs share the
+/// repository's entry in the tab row.
+private struct RepositoryWorktreeBar: View {
+    @ObservedObject private var tab: RepositoryTab
+    @ObservedObject private var model: RepositoryModel
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
 
+    init(tab: RepositoryTab) {
+        _tab = ObservedObject(wrappedValue: tab)
+        _model = ObservedObject(wrappedValue: tab.model)
+    }
+
     var body: some View {
-        Menu {
-            // Empty until the repository has a linked worktree.
-            if !model.worktrees.isEmpty {
-                Section("Worktrees") {
-                    ForEach(model.worktrees) { worktree in
-                        Button {
-                            tabsModel.switchToWorktree(worktree)
-                        } label: {
-                            if model.isCurrentWorktree(worktree) {
-                                Label(title(of: worktree), systemImage: "checkmark")
-                            } else {
-                                Text(title(of: worktree))
-                            }
+        if tab.repositoryURL != nil, !model.isPlainFolder {
+            HStack(spacing: 0) {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 2) {
+                        CodiconGlyph(icon: .worktree, size: 13, color: AppTheme.muted)
+                            .frame(width: 20, height: 22)
+                            .accessibilityHidden(true)
+
+                        ForEach(worktrees) { worktree in
+                            // Git lists the main worktree first, and it
+                            // cannot be removed.
+                            let isMain = worktree.id == worktrees.first?.id
+                            RepositoryWorktreeBarItem(
+                                worktree: worktree,
+                                isMain: isMain,
+                                isCurrent: tab.shows(worktree),
+                                isRemovable: !isMain && !isBusy
+                            )
                         }
                     }
+                    .padding(.leading, 8)
+                    .frame(height: 30)
                 }
+                .scrollIndicators(.never)
+                .modifier(HorizontalScrollEdgeBlur(fill: AppTheme.canvas, bottomInset: 1))
 
-                Divider()
-            }
-
-            Button("New Worktree…") {
-                guard let input = GitPrompt.newWorktree(
-                    defaultPath: model.defaultWorktreePath(for: "branch")
-                ) else { return }
-                Task {
-                    if let worktree = await model.addWorktree(
-                        branch: input.branch,
-                        path: input.path
-                    ) {
-                        tabsModel.switchToWorktree(worktree)
-                    }
+                Button {
+                    createWorktree()
+                } label: {
+                    Label("New Worktree", systemImage: "plus")
+                        .font(AppType.captionEmphasis)
+                        .padding(.horizontal, 8)
+                        .frame(height: 22)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(AppTheme.secondary)
+                .disabled(model.headHash == nil || isBusy)
+                .help("Check out a branch in its own folder")
+                .padding(.horizontal, 6)
             }
-            .disabled(model.headHash == nil)
-
-            Menu("Remove Worktree") {
-                ForEach(removableWorktrees) { worktree in
-                    Button(title(of: worktree)) {
-                        guard GitPrompt.confirmRemoveWorktree(worktree) else { return }
-                        tabsModel.removeWorktree(worktree)
-                    }
-                }
+            .frame(height: 30)
+            .background(AppTheme.canvas)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(AppTheme.edge)
+                    .frame(height: 1)
             }
-            .disabled(removableWorktrees.isEmpty)
-        } label: {
-            CodiconGlyph(icon: .worktree, size: 14, color: AppTheme.primary)
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Worktrees")
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .tint(AppTheme.primary)
-        .help("Worktree: \(currentName)")
-        .accessibilityLabel("Worktrees. Current worktree: \(currentName)")
     }
 
-    private func title(of worktree: GitWorktree) -> String {
-        "\(worktree.name) (\(worktree.branch ?? "detached HEAD"))"
+    /// A repository without linked worktrees lists only its own folder.
+    private var worktrees: [GitWorktree] {
+        if !tab.worktrees.isEmpty { return tab.worktrees }
+        guard let path = model.sshRepository?.path ?? model.repositoryURL?.path else {
+            return []
+        }
+        return [GitWorktree(
+            path: path,
+            branch: model.branch == "detached HEAD" ? nil : model.branch,
+            sshHost: model.sshRepository?.host
+        )]
     }
 
-    private var currentName: String {
-        model.worktrees.first(where: model.isCurrentWorktree)?.name
-            ?? model.repositoryURL?.lastPathComponent
-            ?? ""
+    private var isBusy: Bool {
+        model.repositoryURL == nil
+            || model.isBusy
+            || model.isGeneratingCommitMessage
+            || model.hasPendingChangeOperations
     }
 
-    /// Git lists the main worktree first, and it cannot be removed.
-    private var removableWorktrees: [GitWorktree] {
-        Array(model.worktrees.dropFirst())
+    private func createWorktree() {
+        guard let input = GitPrompt.newWorktree(
+            defaultPath: model.defaultWorktreePath(for: "branch")
+        ) else { return }
+        Task {
+            if let worktree = await model.addWorktree(
+                branch: input.branch,
+                path: input.path
+            ) {
+                tabsModel.switchToWorktree(worktree)
+            }
+        }
+    }
+}
+
+/// Blurs and fades the edges of a horizontal scroll view that hides its
+/// scrollers, on each side where content is scrolled out of view. The system
+/// scroll edge effect only covers top and bottom edges.
+private struct HorizontalScrollEdgeBlur: ViewModifier {
+    let fill: Color
+    var bottomInset: CGFloat = 0
+    @State private var hidesLeadingContent = false
+    @State private var hidesTrailingContent = false
+
+    private let width: CGFloat = 32
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: [Bool].self) { geometry in
+                let offset = geometry.contentOffset.x
+                return [
+                    offset > 1,
+                    offset + geometry.containerSize.width < geometry.contentSize.width - 1
+                ]
+            } action: { _, hiddenEdges in
+                hidesLeadingContent = hiddenEdges[0]
+                hidesTrailingContent = hiddenEdges[1]
+            }
+            .overlay(alignment: .leading) {
+                if hidesLeadingContent { edge(fadingTo: .trailing) }
+            }
+            .overlay(alignment: .trailing) {
+                if hidesTrailingContent { edge(fadingTo: .leading) }
+            }
+    }
+
+    /// Strongest at the scroll view's edge and gone at `end`.
+    private func edge(fadingTo end: UnitPoint) -> some View {
+        let start = UnitPoint(x: 1 - end.x, y: 0.5)
+        return ZStack {
+            // The blur stops before the color fade does, because past that
+            // point the fade is too thin to hide the material's tint.
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .mask(LinearGradient(
+                    stops: [.init(color: .black, location: 0), .init(color: .clear, location: 0.6)],
+                    startPoint: start,
+                    endPoint: end
+                ))
+            // Covers the material's tint at the edge, where it would
+            // otherwise show as a lighter band on dark strips.
+            LinearGradient(
+                colors: [fill, fill.opacity(0.85), fill.opacity(0.4), fill.opacity(0)],
+                startPoint: start,
+                endPoint: end
+            )
+        }
+        .frame(width: width)
+        .padding(.bottom, bottomInset)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct RepositoryWorktreeBarItem: View {
+    @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    let worktree: GitWorktree
+    let isMain: Bool
+    let isCurrent: Bool
+    let isRemovable: Bool
+    @State private var hovering = false
+
+    /// Git checks a branch out in only one worktree, so the branch names it.
+    /// The folder is usually `<repo>-<branch>` and only adds width, so it
+    /// moves to the tooltip. A detached HEAD falls back to the folder.
+    private var title: String {
+        worktree.branch ?? worktree.name
+    }
+
+    private var location: String {
+        let path = worktree.sshHost.map { "\($0):\(worktree.path)" } ?? worktree.path
+        return isMain ? "Main worktree at \(path)" : path
+    }
+
+    var body: some View {
+        Button {
+            tabsModel.switchToWorktree(worktree)
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background {
+                if isCurrent || hovering {
+                    RoundedRectangle(cornerRadius: 5)
+                        // Some themes derive raisedFill from the canvas, which
+                        // would hide the current worktree.
+                        .fill(isCurrent ? AppTheme.selection : AppTheme.hover)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isCurrent ? AppTheme.primary : AppTheme.secondary)
+        .onHover { hovering = $0 }
+        .help(location)
+        .accessibilityLabel(title)
+        .accessibilityHint(location)
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
+        .contextMenu {
+            if worktree.sshHost == nil {
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([worktree.url])
+                }
+            }
+
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(worktree.path, forType: .string)
+            }
+
+            Divider()
+
+            Button("Remove Worktree…") {
+                guard GitPrompt.confirmRemoveWorktree(worktree) else { return }
+                tabsModel.removeWorktree(worktree)
+            }
+            .disabled(!isRemovable)
+        }
     }
 }
 
@@ -311,10 +469,6 @@ private struct RepositoryStatusBar: View {
                 }
             } else if model.repositoryURL != nil {
                 branchMenu
-
-                RepositoryWorktreeMenu(model: model)
-                    .padding(.leading, 12)
-                    .disabled(branchMenuDisabled)
 
                 Spacer(minLength: 0)
 
@@ -2936,7 +3090,7 @@ private struct RepositoryTopBar: View {
             // When the tabs fit, hug their content so the leftover width is
             // empty (and therefore draggable via WindowDragArea); fall back to
             // the scrolling strip only on overflow.
-            if tabsModel.tabs.count <= 3 {
+            if tabsModel.topLevelTabs.count <= 3 {
                 HStack(spacing: 3) {
                     tabItems
                 }
@@ -2964,13 +3118,13 @@ private struct RepositoryTopBar: View {
         .frame(height: 34)
         .frame(maxWidth: .infinity)
         .coordinateSpace(name: Self.coordinateSpaceName)
-        // No divider under the strip: a dark line there reads as the bar
-        // casting shade on the content, which pushes the panel (and the tab
-        // merged into it) visually behind the bar. The recessed strip color
-        // alone defines the boundary, keeping tab + panel one front surface.
+        // The hairline under the strip is lighter than the canvas, so it
+        // reads as the panel's top edge rather than as the bar casting shade.
+        // The active tab covers it and continues it with its outline, which
+        // keeps the tab and the panel one front surface.
         .backgroundPreferenceValue(TabFramesPreferenceKey.self) { frames in
             WindowDragArea(
-                orderedTabIDs: tabsModel.tabs.map(\.id),
+                orderedTabIDs: tabsModel.topLevelTabs.map(\.id),
                 tabFrames: frames,
                 dragState: dragState,
                 selectTab: { tabsModel.select($0) },
@@ -2982,6 +3136,11 @@ private struct RepositoryTopBar: View {
                 }
             )
         }
+        .background(alignment: .bottom) {
+            Rectangle()
+                .fill(AppTheme.tabOutline)
+                .frame(height: 1)
+        }
         .background(AppTheme.tabStripFill)
         // Confine the active tab's shadow to the bar so it never smudges the
         // panel below the divider, where the tab merges with the content.
@@ -2989,7 +3148,7 @@ private struct RepositoryTopBar: View {
     }
 
     private var tabItems: some View {
-        ForEach(tabsModel.tabs) { tab in
+        ForEach(tabsModel.topLevelTabs) { tab in
             RepositoryTabItem(
                 tab: tab,
                 isActive: tab.id == tabsModel.activeTabID,
@@ -3008,6 +3167,8 @@ private struct RepositoryTopBar: View {
             }
             // `.hidden` can still show a legacy scroller when a mouse is used.
             .scrollIndicators(.never)
+            // The strip's bottom hairline stays sharp under the blur.
+            .modifier(HorizontalScrollEdgeBlur(fill: AppTheme.tabStripFill, bottomInset: 1))
             .onChange(of: tabsModel.activeTabID) {
                 pendingTabScroll?.cancel()
                 let tabID = tabsModel.activeTabID
@@ -3023,6 +3184,8 @@ private struct RepositoryTopBar: View {
                     execute: workItem
                 )
             }
+            // A restored active tab can sit past the strip's edge at launch.
+            .onAppear { proxy.scrollTo(tabsModel.activeTabID, anchor: .center) }
             .onDisappear { pendingTabScroll?.cancel() }
         }
     }
@@ -3313,6 +3476,40 @@ private struct TabBaseFillet: Shape {
     }
 }
 
+/// The active tab's silhouette without its base: up from the strip's bottom
+/// hairline through the leading fillet, over the rounded top, and back down
+/// through the trailing fillet. It draws past its rect by the fillet width.
+private struct ActiveTabOutline: Shape {
+    private let radius: CGFloat = 5
+
+    func path(in rect: CGRect) -> Path {
+        // Center the stroke on the strip's 1-point bottom hairline.
+        let bottom = rect.maxY - 0.5
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX - radius, y: bottom))
+        path.addArc(
+            center: CGPoint(x: rect.minX - radius, y: bottom - radius), radius: radius,
+            startAngle: .degrees(90), endAngle: .degrees(0), clockwise: true
+        )
+        path.addArc(
+            tangent1End: CGPoint(x: rect.minX, y: rect.minY),
+            tangent2End: CGPoint(x: rect.maxX, y: rect.minY),
+            radius: radius
+        )
+        path.addArc(
+            tangent1End: CGPoint(x: rect.maxX, y: rect.minY),
+            tangent2End: CGPoint(x: rect.maxX, y: bottom),
+            radius: radius
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: bottom - radius))
+        path.addArc(
+            center: CGPoint(x: rect.maxX + radius, y: bottom - radius), radius: radius,
+            startAngle: .degrees(180), endAngle: .degrees(90), clockwise: true
+        )
+        return path
+    }
+}
+
 private struct RepositoryTabItem: View {
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
     @ObservedObject var tab: RepositoryTab
@@ -3327,7 +3524,8 @@ private struct RepositoryTabItem: View {
         _tab = ObservedObject(wrappedValue: tab)
         _dragState = ObservedObject(wrappedValue: dragState)
         tabID = tab.id
-        tabName = tab.displayName
+        // A worktree's tab is named after its repository's main worktree.
+        tabName = tab.worktrees.first?.name ?? tab.displayName
         self.isActive = isActive
     }
 
@@ -3429,6 +3627,12 @@ private struct RepositoryTabItem: View {
                     .offset(x: 5)
             }
         }
+        .overlay {
+            if isActive {
+                ActiveTabOutline()
+                    .stroke(AppTheme.tabOutline, lineWidth: 1)
+            }
+        }
         .padding(.bottom, isActive ? 0 : 5)
         .frame(height: 34, alignment: .bottom)
         // The offset comes before the frame-reporting background: modifiers
@@ -3474,7 +3678,7 @@ private struct RepositoryTabItem: View {
             Button("Close Other Tabs") {
                 tabsModel.closeOthers(tabID)
             }
-            .disabled(tabsModel.tabs.count < 2)
+            .disabled(tabsModel.topLevelTabs.count < 2)
 
             if let url = tab.repositoryURL {
                 let sshRepository = SSHRepository.mirrored(at: url)

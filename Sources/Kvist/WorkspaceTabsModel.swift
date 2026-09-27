@@ -20,16 +20,28 @@ final class RepositoryTab: ObservableObject, Identifiable {
     /// drive that is not connected. The tab and any recovered draft stay
     /// until the folder returns or the user closes the tab.
     @Published private(set) var isFolderMissing = false
+    /// Every worktree of the tab's repository once it has linked worktrees,
+    /// and empty otherwise. Git lists the main worktree first. Saved with the
+    /// workspace so restored tabs group before they load.
+    @Published fileprivate(set) var worktrees: [GitWorktree] = []
 
     init(
         id: UUID = UUID(),
         repositoryURL: URL? = nil,
-        restorationState: RepositoryRestorationState? = nil
+        restorationState: RepositoryRestorationState? = nil,
+        worktrees: [GitWorktree] = []
     ) {
         self.id = id
         repositoryPath = repositoryURL?.standardizedFileURL.path
         pendingRestorationState = restorationState
         isRepositoryLoadPending = repositoryURL != nil
+        self.worktrees = worktrees
+    }
+
+    /// Tabs of one repository's worktrees share this ID and one entry in
+    /// the top row.
+    var worktreeGroupID: String? {
+        worktrees.first.map { "\($0.sshHost ?? ""):\($0.path)" }
     }
 
     var model: RepositoryModel {
@@ -72,7 +84,7 @@ final class RepositoryTab: ObservableObject, Identifiable {
         return result.actionIndex == 1
     }
 
-    fileprivate func shows(_ worktree: GitWorktree) -> Bool {
+    func shows(_ worktree: GitWorktree) -> Bool {
         guard let repositoryPath else { return false }
         guard let sshHost = worktree.sshHost else {
             return repositoryPath == worktree.url.standardizedFileURL.path
@@ -204,6 +216,7 @@ private struct RestoredRepositoryTab: Codable {
     let id: UUID
     let repositoryPath: String?
     let state: RepositoryRestorationState
+    let worktrees: [GitWorktree]?
 }
 
 private struct RestoredWorkspace: Codable {
@@ -229,7 +242,10 @@ final class WorkspaceTabsModel: ObservableObject {
     private let recentRepositoriesKey = "recentRepositoryPaths"
     private let restoredWorkspaceKey = "restoredWorkspaceV2"
     private let recentRepositoriesLimit = 7
-    private var repositorySubscriptions: [UUID: AnyCancellable] = [:]
+    private var repositorySubscriptions: [UUID: [AnyCancellable]] = [:]
+    /// The tab each worktree group showed last, so its top-row entry returns
+    /// to that worktree.
+    private var lastActiveTabIDByWorktreeGroup: [String: UUID] = [:]
     private var activeModelSubscription: AnyCancellable?
     private var persistenceTask: Task<Void, Never>?
     private var monitoringActivationWorkItem: DispatchWorkItem?
@@ -290,7 +306,8 @@ final class WorkspaceTabsModel: ObservableObject {
             return RepositoryTab(
                 id: saved.id,
                 repositoryURL: URL(fileURLWithPath: standardizedPath, isDirectory: true),
-                restorationState: saved.state
+                restorationState: saved.state,
+                worktrees: saved.worktrees ?? []
             )
         } ?? []
         let restoredTabs: [RepositoryTab]
@@ -332,7 +349,12 @@ final class WorkspaceTabsModel: ObservableObject {
 
     private func activeTabDidChange(from oldTabID: UUID) {
         monitoringActivationWorkItem?.cancel()
-        tabs.first(where: { $0.id == oldTabID })?.deactivate()
+        if let oldTab = tabs.first(where: { $0.id == oldTabID }) {
+            if let group = oldTab.worktreeGroupID {
+                lastActiveTabIDByWorktreeGroup[group] = oldTab.id
+            }
+            oldTab.deactivate()
+        }
         activate(activeTab)
         forwardActiveModelChanges()
     }
@@ -420,15 +442,46 @@ final class WorkspaceTabsModel: ObservableObject {
         persistTabs()
     }
 
+    /// The top row's entries: one per repository. The tabs of one
+    /// repository's worktrees share an entry, shown by the active tab or the
+    /// one the group showed last.
+    var topLevelTabs: [RepositoryTab] {
+        var seenGroups = Set<String>()
+        return tabs.compactMap { tab in
+            guard let group = tab.worktreeGroupID else { return tab }
+            guard seenGroups.insert(group).inserted else { return nil }
+            return representative(of: tab)
+        }
+    }
+
+    private func worktreeGroup(of tab: RepositoryTab) -> [RepositoryTab] {
+        guard let group = tab.worktreeGroupID else { return [tab] }
+        return tabs.filter { $0.worktreeGroupID == group }
+    }
+
+    private func representative(of tab: RepositoryTab) -> RepositoryTab {
+        let members = worktreeGroup(of: tab)
+        let lastActiveID = tab.worktreeGroupID.flatMap { lastActiveTabIDByWorktreeGroup[$0] }
+        return members.first { $0.id == activeTabID }
+            ?? members.first { $0.id == lastActiveID }
+            ?? members.first
+            ?? tab
+    }
+
     /// Selects the tab that shows the worktree, or opens it in a new tab
     /// after the active one so each worktree keeps its own drafts and panels.
+    /// The new tab joins the active tab's group in the top row.
     func switchToWorktree(_ worktree: GitWorktree) {
         if let existingTab = tabs.first(where: { $0.shows(worktree) }) {
             select(existingTab.id)
             return
         }
-        let tab = RepositoryTab(repositoryURL: worktree.sshHost == nil ? worktree.url : nil)
-        let index = tabs.firstIndex(where: { $0.id == activeTabID }) ?? tabs.count - 1
+        let tab = RepositoryTab(
+            repositoryURL: worktree.sshHost == nil ? worktree.url : nil,
+            worktrees: activeTab.worktrees.contains(worktree) ? activeTab.worktrees : []
+        )
+        let group = worktreeGroup(of: activeTab)
+        let index = tabs.lastIndex { tab in group.contains { $0 === tab } } ?? tabs.count - 1
         tabs.insert(tab, at: index + 1)
         observeRepository(tab)
         activeTabID = tab.id
@@ -450,9 +503,7 @@ final class WorkspaceTabsModel: ObservableObject {
                let remaining = model.worktrees.first(where: { $0.path != worktree.path }) {
                 switchToWorktree(remaining)
             }
-            for tab in affectedTabs {
-                close(tab.id, confirmingDiscard: false)
-            }
+            closeTabs(affectedTabs)
         }
     }
 
@@ -472,38 +523,53 @@ final class WorkspaceTabsModel: ObservableObject {
     }
 
     private func selectAdjacentTab(offset: Int) {
-        guard tabs.count > 1,
-              let index = tabs.firstIndex(where: { $0.id == activeTabID }) else {
+        let entries = topLevelTabs
+        guard entries.count > 1,
+              let index = entries.firstIndex(where: { $0.id == activeTabID }) else {
             return
         }
-        let next = (index + offset + tabs.count) % tabs.count
-        select(tabs[next].id)
+        let next = (index + offset + entries.count) % entries.count
+        select(entries[next].id)
     }
 
+    /// Moves a top-row entry, with all of its worktree tabs, to `targetIndex`
+    /// in the top row.
     func moveTab(_ tabID: UUID, toIndex targetIndex: Int) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let destination = min(max(targetIndex, 0), tabs.count - 1)
+        var entries = topLevelTabs
+        guard let index = entries.firstIndex(where: { $0.id == tabID }) else { return }
+        let destination = min(max(targetIndex, 0), entries.count - 1)
         guard destination != index else { return }
-        let tab = tabs.remove(at: index)
-        tabs.insert(tab, at: destination)
+        entries.insert(entries.remove(at: index), at: destination)
+        tabs = entries.flatMap(worktreeGroup(of:))
         persistTabs()
     }
 
-    func close(_ tabID: UUID, confirmingDiscard: Bool = true) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        guard !confirmingDiscard || tabs[index].confirmDiscardChanges() else { return }
-        tabs[index].deactivate(isClosing: true)
-        repositorySubscriptions[tabID] = nil
-        let closedTab = tabs.remove(at: index)
-        removeSSHDownloads(of: [closedTab])
+    /// Closes the tab together with the tabs of its repository's other
+    /// worktrees, since they share one entry in the top row.
+    func close(_ tabID: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
+        let closedTabs = worktreeGroup(of: tab)
+        guard closedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
+        closeTabs(closedTabs)
+    }
+
+    private func closeTabs(_ closedTabs: [RepositoryTab]) {
+        let closedIDs = Set(closedTabs.map(\.id))
+        guard let index = tabs.firstIndex(where: { closedIDs.contains($0.id) }) else { return }
+        for tab in closedTabs {
+            tab.deactivate(isClosing: true)
+            repositorySubscriptions[tab.id] = nil
+        }
+        tabs.removeAll { closedIDs.contains($0.id) }
+        removeSSHDownloads(of: closedTabs)
 
         if tabs.isEmpty {
             let replacement = RepositoryTab()
             tabs = [replacement]
             observeRepository(replacement)
             activeTabID = replacement.id
-        } else if activeTabID == tabID {
-            activeTabID = tabs[min(index, tabs.count - 1)].id
+        } else if closedIDs.contains(activeTabID) {
+            activeTabID = representative(of: tabs[min(index, tabs.count - 1)]).id
         }
 
         persistTabs()
@@ -511,17 +577,16 @@ final class WorkspaceTabsModel: ObservableObject {
 
     func closeOthers(_ tabID: UUID) {
         guard let keptTab = tabs.first(where: { $0.id == tabID }) else { return }
-        guard tabs.filter({ $0.id != tabID }).allSatisfy({
-            $0.confirmDiscardChanges()
-        }) else { return }
-        let closedTabs = tabs.filter { $0.id != tabID }
+        let keptTabs = worktreeGroup(of: keptTab)
+        let closedTabs = tabs.filter { tab in !keptTabs.contains { $0 === tab } }
+        guard closedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
         for tab in closedTabs {
             tab.deactivate(isClosing: true)
             repositorySubscriptions[tab.id] = nil
         }
-        tabs = [keptTab]
+        tabs = keptTabs
         removeSSHDownloads(of: closedTabs)
-        if activeTabID != keptTab.id {
+        if !keptTabs.contains(where: { $0.id == activeTabID }) {
             activeTabID = keptTab.id
         }
         persistTabs()
@@ -626,17 +691,33 @@ final class WorkspaceTabsModel: ObservableObject {
 
     private func observeRepositoryModel(_ model: RepositoryModel, for tab: RepositoryTab) {
         model.switchToWorktree = { [weak self] in self?.switchToWorktree($0) }
-        repositorySubscriptions[tab.id] = model.$repositoryURL
-            .dropFirst()
-            .sink { [weak self, weak tab] repositoryURL in
-                let path = repositoryURL?.standardizedFileURL.path
-                tab?.repositoryPath = path
-                tab?.objectWillChange.send()
-                if let path {
-                    self?.recordRecentRepository(path: path)
+        repositorySubscriptions[tab.id] = [
+            model.$repositoryURL
+                .dropFirst()
+                .sink { [weak self, weak tab] repositoryURL in
+                    let path = repositoryURL?.standardizedFileURL.path
+                    tab?.repositoryPath = path
+                    tab?.objectWillChange.send()
+                    if let path {
+                        self?.recordRecentRepository(path: path)
+                    }
+                    self?.persistTabs()
+                },
+            // Read the worktrees only once a repository has loaded, so a
+            // restored tab keeps its saved list until then. Watching the URL
+            // too catches a load that finds no linked worktrees, which leaves
+            // the model's empty list unchanged.
+            model.$repositoryURL.combineLatest(model.$worktrees)
+                .sink { [weak self, weak tab] repositoryURL, worktrees in
+                    guard let self, let tab, repositoryURL != nil else { return }
+                    let grouped = worktrees.count > 1 ? worktrees : []
+                    guard tab.worktrees != grouped else { return }
+                    // The top row is drawn from this object, not the tab.
+                    self.objectWillChange.send()
+                    tab.worktrees = grouped
+                    self.persistTabs()
                 }
-                self?.persistTabs()
-            }
+        ]
     }
 
     private func persistTabs() {
@@ -678,7 +759,8 @@ final class WorkspaceTabsModel: ObservableObject {
             RestoredRepositoryTab(
                 id: $0.id,
                 repositoryPath: $0.repositoryPath,
-                state: $0.restorationState
+                state: $0.restorationState,
+                worktrees: $0.worktrees
             )
         }
         let workspace = RestoredWorkspace(

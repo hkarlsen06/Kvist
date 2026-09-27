@@ -248,7 +248,7 @@ struct GitRemote: Identifiable, Hashable, Sendable {
     }
 }
 
-struct GitWorktree: Identifiable, Hashable, Sendable {
+struct GitWorktree: Identifiable, Hashable, Sendable, Codable {
     let path: String
     /// The checked-out branch's short name, or nil for a detached HEAD.
     let branch: String?

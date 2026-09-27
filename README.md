@@ -13,7 +13,7 @@ browser and editor for any folder on a remote machine over SSH.
 - Switch between Git and Files modes (`⌘1` / `⌘2`, or `⌃Tab` to toggle)
 - Edit text files in a native source editor with `⌘S` saving, and preview other file types with macOS Quick Look
 - Create, rename, delete, and check out local or remote-tracking branches
-- Create, remove, and switch between worktrees, local or over SSH, from the worktree menu in the status bar. Each worktree opens in its own tab. Checking out or rebasing a branch that another worktree has checked out happens in that worktree
+- Create, remove, and switch between worktrees, local or over SSH, from the worktree row under the tab row. Each worktree opens in its own tab, and a repository's worktree tabs share one entry in the tab row. Checking out or rebasing a branch that another worktree has checked out happens in that worktree
 - Fast-forward a branch such as `main` to the current branch without checking it out, for example after rebasing a feature branch onto it
 - View staged, modified, deleted, renamed, and untracked files
 - Stage or unstage one file or all files, stash changes, or discard all changes with confirmation
