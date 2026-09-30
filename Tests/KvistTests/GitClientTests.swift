@@ -2286,10 +2286,10 @@ final class GitClientTests: XCTestCase {
         [ "$model" = "gpt-9-luna" ] || exit 64
         [ "$effort" = 'model_reasoning_effort=low' ] || exit 65
         input="$(cat)"
-        printf '%s' "$input" | grep -q 'Run `git diff --cached --no-ext-diff --no-color`' || exit 66
+        printf '%s' "$input" | grep -q 'Do not inspect the repository, run tools' || exit 66
         printf '%s' "$input" | grep -q 'Ignore every unstaged modification' || exit 67
         printf '%s' "$input" | grep -q 'Emphasize the graph fix' || exit 68
-        printf '%s' "$input" | grep -q '+staged' && exit 69
+        printf '%s' "$input" | grep -q '^+staged$' || exit 69
         printf '{"message":"fix: repair graph lanes"}' > "$output"
         printf '{"message":"fix: repair graph lanes"}'
         """ .write(
@@ -2321,6 +2321,68 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(message, "fix: repair graph lanes")
     }
 
+    func testAICommitDiffListsEveryFileButSkipsStringsLockfilesAndGeneratedFiles() throws {
+        let files = [
+            ".gitattributes": "Generated.swift linguist-generated\n",
+            "Feature.swift": "let feature = 1\n",
+            "Generated.swift": "let generated = 1\n",
+            "Package.resolved": "{\"pins\": []}\n",
+            "App/en.lproj/Localizable.strings": "\"greeting\" = \"Hello\";\n",
+            "App/Localizable.xcstrings": "{\"strings\": {}}\n"
+        ]
+        for (path, contents) in files {
+            let url = repositoryURL.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try GitClient(repositoryURL: repositoryURL).stageAll()
+
+        let staged = try AICommitMessageGenerator().readStagedDiff(
+            in: repositoryURL,
+            overSSH: nil
+        )
+
+        for path in files.keys {
+            XCTAssertTrue(staged.summary.contains(path), path)
+        }
+        XCTAssertTrue(staged.diff.contains("+let feature = 1"))
+        for hidden in ["let generated", "pins", "Hello", "\"strings\""] {
+            XCTAssertFalse(staged.diff.contains(hidden), hidden)
+        }
+    }
+
+    func testBudgetedDiffSharesSpaceAcrossFiles() {
+        let small = "diff --git a/small b/small\n+small change"
+        let huge = "diff --git a/huge b/huge\n"
+            + (1...5_000).map { "+line \($0)" }.joined(separator: "\n")
+        let medium = "diff --git a/medium b/medium\n"
+            + (1...200).map { "+medium \($0)" }.joined(separator: "\n")
+
+        let result = AICommitMessageGenerator.budgetedDiff(
+            [huge, small, medium].joined(separator: "\n"),
+            limit: 4_000
+        )
+
+        XCTAssertTrue(result.contains(small))
+        XCTAssertTrue(result.contains("+medium 1\n"))
+        XCTAssertTrue(result.contains("+line 1\n"))
+        XCTAssertFalse(result.contains("+line 5000"))
+        XCTAssertTrue(result.contains("more lines of this file.]"))
+        XCTAssertLessThan(result.utf8.count, 4_200)
+        XCTAssertLessThan(result.range(of: "huge")!.lowerBound, result.range(of: "small")!.lowerBound)
+        XCTAssertEqual(AICommitMessageGenerator.budgetedDiff(small), small)
+
+        let crlf = "diff --git a/crlf b/crlf\n"
+            + (1...5_000).map { "+windows \($0)\r" }.joined(separator: "\n")
+        XCTAssertTrue(
+            AICommitMessageGenerator.budgetedDiff(crlf + "\n" + small, limit: 4_000)
+                .contains(small)
+        )
+    }
+
     func testAICommitGeneratorReadsClaudeStructuredOutput() throws {
         let claudeURL = repositoryURL.appendingPathComponent("working-claude")
         try "staged\n".write(
@@ -2348,7 +2410,7 @@ final class GitClientTests: XCTestCase {
         done
         [ "$model" = "opus" ] || exit 64
         input="$(cat)"
-        printf '%s' "$input" | grep -q 'only the staged Git diff' || exit 65
+        printf '%s' "$input" | grep -q 'only the staged Git changes' || exit 65
         printf '%s' "$input" | grep -q '+staged' || exit 66
         printf '{"structured_output":{"message":"feat: support Claude messages"}}'
         """ .write(

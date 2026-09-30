@@ -542,6 +542,43 @@ final class CommitBackendTests: XCTestCase {
         )
     }
 
+    func testPullRebasingReplaysLocalCommitOnFetchedUpstream() throws {
+        let bareURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KvistPullRebaseOrigin-\(UUID().uuidString).git")
+        let otherURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KvistPullRebaseOther-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: bareURL)
+            try? FileManager.default.removeItem(at: otherURL)
+        }
+
+        try commitFile(path: "base.txt", contents: "base\n", message: "Base")
+        try git(["init", "--bare", bareURL.path])
+        try git(["remote", "add", "origin", bareURL.path])
+        try git(["push", "--set-upstream", "origin", "main"])
+
+        try git(["clone", bareURL.path, otherURL.path])
+        try "remote\n".write(
+            to: otherURL.appendingPathComponent("remote.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try git(["add", "remote.txt"], in: otherURL)
+        try git([
+            "-c", "user.name=Other", "-c", "user.email=other@example.invalid",
+            "commit", "-m", "Remote"
+        ], in: otherURL)
+        try git(["push"], in: otherURL)
+
+        try commitFile(path: "local.txt", contents: "local\n", message: "Local")
+        _ = try GitClient(repositoryURL: repositoryURL).pullRebasing()
+
+        XCTAssertEqual(
+            try git(["log", "--format=%s"]).split(whereSeparator: \.isNewline),
+            ["Local", "Remote", "Base"]
+        )
+    }
+
     func testDetectsAndAbortsConflictedRebase() throws {
         let client = GitClient(repositoryURL: repositoryURL)
         try commitFile(path: "conflict.txt", contents: "base\n", message: "Base")

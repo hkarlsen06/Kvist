@@ -1945,7 +1945,15 @@ struct GitClient: Sendable {
     }
 
     func pullRebasing() throws -> String {
-        try run(["pull", "--rebase", "--progress"], timeout: Self.networkOperationTimeout)
+        // `git pull --rebase` reads FETCH_HEAD, so a background fetch by
+        // another app can make it fail with "Cannot rebase onto multiple
+        // branches". A plain `git rebase` uses the upstream ref instead, with
+        // the same fork-point handling as pull.
+        let fetchOutput = try run(["fetch", "--progress"], timeout: Self.networkOperationTimeout)
+        let rebaseOutput = try run(["rebase"])
+        return [fetchOutput, rebaseOutput]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
     }
 
     func push() throws -> String {
