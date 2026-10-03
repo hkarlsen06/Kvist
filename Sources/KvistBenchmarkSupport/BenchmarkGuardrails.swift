@@ -292,9 +292,10 @@ public struct GuardrailResult: Codable, Equatable {
 public enum BenchmarkLimits {
     // The release binary alone measures 3.3 MiB and the bundled file-icon
     // theme 0.7 MiB, so the earlier 2.75/1.15 limits could never pass; a
-    // 0.2.0 build measures 4.29 MiB raw and 2.19 MiB compressed.
-    public static let bundleMiB = 4.5
-    public static let compressedMiB = 2.4
+    // 0.2.0 build measures 4.29 MiB raw and 2.19 MiB compressed. Worktree
+    // support took 0.5.0 to 4.86 MiB raw and 2.46 MiB compressed.
+    public static let bundleMiB = 5.0
+    public static let compressedMiB = 2.6
     public static let launchMedianMilliseconds = 250.0
     public static let launchP95Milliseconds = 275.0
     public static let startupPeakMiB = 35.0
