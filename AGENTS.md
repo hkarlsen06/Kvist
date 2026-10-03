@@ -2,7 +2,63 @@
 
 After changes affecting the runnable app, build and install the newest build to /Applications. Documentation-only or instruction-only edits do not require a rebuild or install.
 
-When cutting a release, do not install the release build to /Applications. The installed copy stays on the previous version so the user can test that Kvist finds, shows, and installs the new release through its in-app updater once the release is published.
+When cutting a release, do not install the release build to /Applications. The installed copy stays on the previous version so the user can test that Kvist finds, shows, and installs the new release through its in-app updater once the release is published. The release steps are in [DISTRIBUTION.md](DISTRIBUTION.md).
+
+## Build, install, and test
+
+Install with these commands. They take about a minute:
+
+```sh
+osascript -e 'quit app "Kvist"'
+KVIST_SIGNING_IDENTITY="Developer ID Application: Hjalmar Karlsen (48ZSLD4RMP)" \
+  Scripts/package.sh /Applications/Kvist.app
+open -a /Applications/Kvist.app
+```
+
+Quit Kvist normally rather than with `kill`, so it saves open tabs and editor drafts. `package.sh` stages the app beside the target and swaps it in, so do not `rm` or `ditto` into the bundle yourself. Without `KVIST_SIGNING_IDENTITY` the build is ad-hoc signed, and an ad-hoc install cannot use the in-app updater. If `security find-identity -v -p codesigning` lists no Developer ID identity, drop the variable to build ad-hoc and tell the user the installed copy cannot update itself. A running Kvist keeps the old code until it relaunches.
+
+The build needs full Xcode. The asset catalog uses `actool`, which the Command Line Tools lack. If `swift build` fails on `actool`, prefix the command with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and leave `xcode-select` alone.
+
+Run tests with:
+
+```sh
+swift test > /tmp/kvist-test.log 2>&1; grep -nE "error:| failed \(|Executed [0-9]{3,} tests" /tmp/kvist-test.log | grep -v CoreData
+```
+
+The full suite has 285 XCTest cases and takes about 90 seconds. All of them pass on `main`. The last `grep` drops the `CoreData: error` lines that Contacts writes to the log. The last `Executed` line belongs to the 14-test benchmark bundle, and `Executed 0 tests` comes from swift-testing, so neither is the main suite's total. A build failure under `--filter` also prints `Executed 0 tests`. Use `swift test --filter WorkspaceTabsModelTests` while iterating. `testRepositoryModelCoalescesWorktreeEventStormIntoOneRefresh` has a timing limit and fails under load, so rerun it alone before you debug it.
+
+The shell is zsh, so quote globs such as `--include='*.swift'`, or use `rg`.
+
+## Where things live
+
+All app code is in `Sources/Kvist`. Several files are large, so search for the type name instead of reading the whole file.
+
+| Area | File and type |
+| --- | --- |
+| App entry, menus, ⌘W and tab-cycling key monitor, window setup | `App.swift` (`KvistApp`, `KvistAppDelegate`) |
+| Tab model, recents, workspace restore | `WorkspaceTabsModel.swift` |
+| Tab strip and tab dragging | `RepositoryTabBar.swift` (`RepositoryTopBar`, `RepositoryTabItem`, `TabDragState`) |
+| Worktree row, status bar, panel split, editor panel | `RepositoryLayoutViews.swift` (`RepositoryWorktreeBar`, `RepositoryStatusBar`, `ActiveRepositoryView`, `RepositoryEditorPanel`) |
+| Changes list, commit field, stash menu | `ChangesPanel.swift` (`ChangesPanel`, `FileSection`, `CommitMessageInput`, `SplitCommitButton`) |
+| History graph and reference menus | `GraphPanel.swift` (`GraphPanel`, `GraphHistoryTable`, `GraphCommitRow`, `ReferenceContextMenuItems`) |
+| Text prompts for branches, tags, stashes, and remotes | `GitPrompt.swift` (`GitPrompt`) |
+| Conflict resolver | `ConflictResolverView.swift`, model in `ConflictResolution.swift` |
+| Window root, welcome screen, recents, mode picker | `Views.swift` (`ContentView`, `WorkspaceView`, `WelcomeView`) |
+| Theme colors and type scale | `Views.swift` (`AppTheme`, `AppType`) |
+| Settings window | `ThemePreferences.swift` (`PreferencesView`, `GeneralPreferencesPane`) |
+| Theme and icon-pack import | `ThemePreferences.swift` (`EditorThemeImporter`) |
+| Repository state and all user actions | `RepositoryModel.swift` (`RepositoryModel`) |
+| Git commands and parsing | `GitClient.swift` |
+| Error dialogs | `GitClient` error to `RepositoryModel.errorPresentation`, shown by `.onChange(of: model.errorPresentation)` in `Views.swift`, then `AppDialog.swift` |
+| File tree, search, editor, image and Quick Look previews | `RepositoryFileBrowser.swift`, `RepositorySearch.swift`, `RepositoryFileEditor.swift` |
+| Working-tree versus HEAD preview toggle | `GitFilePreview.swift` |
+| Diff rendering | `DiffDocument.swift`, `DraftDiff.swift` |
+| SSH transport and remote browser | `SSHConnection.swift`, `SSHRepositoryBrowser.swift`, `SSHMirrorStore.swift` |
+| AI commit messages, both Codex and Claude | `CodexCommitMessageGenerator.swift`, settings in `AICommitMessagePreferences.swift` |
+| In-app updater | `AppUpdater.swift` |
+| Benchmark hooks inside the app | `*PerformanceInstrumentation.swift`; the harnesses are in `Sources/KvistBenchmark*` |
+
+The bundle identifier and defaults domain are `com.hjalmarkarlsen.Kvist`.
 
 ## Modal dialogs
 
@@ -29,6 +85,48 @@ repository watcher ownership, or tab-related task cancellation. The benchmark
 uses 20 isolated temporary repositories and checks unopened and loaded switch
 latency, rapid cycling, memory growth, main-thread stalls, idle use, and orphan
 watchers, processes, or tasks.
+
+A run takes about 4 minutes. Quit every Kvist first, and do not package,
+install, or drive the UI while it runs. `Timed out waiting for
+repository-loaded.json` means the benchmarked app could not present a window
+because another Kvist was running or the user was active. It is not a
+regression, so report it and do not retry in a loop.
+
+One guardrail fails on `main` as of 0.5.0: Rapid-cycle footprint delta
+(3.5 to 10.8 MiB between identical runs, against 3). It looks like a real
+leak. A 300-cycle run settled at 18.5 MiB, so memory keeps growing with more
+switches and does not level off. Do not raise that limit to make a run pass.
+Judge a tab change by the unopened and loaded switch times, the main-thread
+stall, and the orphan counts. If another metric fails, measure `main` the same
+day before you blame the change.
+
+## Verifying in the running app
+
+Drive the installed app, not `.build/debug/Kvist`. A raw binary does not raise
+above other windows, so synthesized clicks land elsewhere. Before clicking,
+confirm Kvist is the first layer-0 window in `CGWindowListCopyWindowInfo`.
+Screenshot only Kvist's window with `screencapture -x -o -l<window number>`.
+
+- Prefer checking side effects over screenshots. `WorkspaceTabsModel` writes
+  `openRepositoryPaths` and `activeRepositoryPath` to defaults as soon as a tab
+  is selected or moved. `restoredWorkspaceV2` takes precedence on restore, so
+  delete it when you seed tabs.
+- A second instance (`open -n`) shares the user's defaults and rewrites their
+  saved workspace. Run `defaults export com.hjalmarkarlsen.Kvist
+  /tmp/kvist-defaults.plist` first, and afterwards delete only the keys the
+  test changed.
+- Read menus through the Accessibility API by PID
+  (`AXUIElementCreateApplication`). AppleScript's `process whose unix id is N`
+  resolves by name and can read the wrong instance. `AXPress` does not open a
+  SwiftUI `Menu` button.
+- `NSLog` output from the installed app is redacted in the unified log. Write
+  debug output to a file in `/tmp` instead. In this shell `log` is a zsh
+  function, so use `/usr/bin/log`.
+- Test SSH repositories as well as local ones. Many features take a separate
+  remote path.
+- To test the updater, package with the Developer ID identity into a temporary
+  folder and lower `CFBundleShortVersionString` below the latest release. Then
+  re-sign, delete `lastUpdateCheckDate`, and launch with `open -n`.
 
 ## Writing style
 

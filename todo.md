@@ -66,7 +66,7 @@
 ## Repository structures
 
 - [ ] Manage submodules.
-- [ ] Create, list, and remove worktrees.
+- [x] Create, list, and remove worktrees.
 - [ ] Manage sparse checkouts.
 - [ ] Manage Git LFS installation, tracking rules, and objects.
 

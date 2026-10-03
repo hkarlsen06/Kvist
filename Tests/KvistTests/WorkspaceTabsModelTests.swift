@@ -627,6 +627,7 @@ final class WorkspaceTabsModelTests: XCTestCase {
         let suiteName = "KvistTests.WorkspaceTabs.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
         return defaults
     }
 

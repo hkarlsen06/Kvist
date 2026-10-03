@@ -43,14 +43,37 @@ Scripts/release.sh
 
 ## Publish the release
 
-Bump `CFBundleShortVersionString` and `CFBundleVersion` in
-`Resources/Info.plist` before running `Scripts/release.sh`. Then publish both
-artifacts on GitHub under a `macos/<version>` tag:
+Releases are built and published from this Mac. There is no CI workflow.
 
-```sh
-gh release create "macos/0.3.2" dist/Kvist.zip dist/Kvist.dmg \
-  --title "Kvist 0.3.2" --notes-file notes.md
-```
+1. Pick the version. A release with new features bumps the minor version, and
+   a fix-only release bumps the patch. Confirm the current version in
+   `Resources/Info.plist` before you choose.
+2. In `Resources/Info.plist`, set `CFBundleShortVersionString` to the new
+   version and add 1 to the integer `CFBundleVersion`. Edit the two strings in
+   place. `plutil -replace` rewrites the whole file's formatting.
+3. Run `swift test`, then commit as `chore: prepare Kvist X.Y.Z release` and
+   push `main`.
+4. Run `Scripts/release.sh`. It takes a few minutes because it notarizes twice,
+   so run it in the background and watch its output.
+5. Publish both artifacts. `gh` creates the `macos/X.Y.Z` tag on GitHub, so
+   fetch it afterwards:
+
+   ```sh
+   gh release create "macos/X.Y.Z" dist/Kvist.zip dist/Kvist.dmg \
+     --target main --title "Kvist X.Y.Z" --notes-file notes.md
+   git fetch --tags
+   ```
+
+6. Do not install the release build into `/Applications`. The installed copy
+   stays on the old version so the user can test the updater against the new
+   release.
+
+Release notes follow the shape of `gh release view macos/0.5.0`. Start with a
+paragraph on what the release adds and a list of changes. Then add "Update
+from Kvist X.Y using Kvist > Check for Updates. Requires macOS 26 or later.
+Both downloads are signed with Developer ID and notarized by Apple." End with
+the SHA-256 of each artifact (`shasum -a 256 dist/Kvist.zip dist/Kvist.dmg`)
+and a "Full changelog" compare link from the previous tag.
 
 Installed copies find the release through the conditions below.
 

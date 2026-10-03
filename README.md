@@ -54,7 +54,8 @@ Scripts/package.sh
 open dist/Kvist.app
 ```
 
-Requires macOS 26 or later and the Apple command-line developer tools.
+Requires macOS 26 or later and Xcode. The asset catalog needs `actool`, which
+the Command Line Tools alone do not include.
 
 For a notarized direct-download release, configure a Developer ID identity and
 notary profile, then run `Scripts/release.sh`. See [DISTRIBUTION.md](DISTRIBUTION.md).
