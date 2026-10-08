@@ -261,6 +261,7 @@ final class RepositoryModel: ObservableObject {
     private var liveRefreshTask: Task<Void, Never>?
     private var workingTreeRefreshTask: Task<Void, Never>?
     private var autoFetchTask: Task<Void, Never>?
+    private var backgroundFetchTask: Task<Bool, Never>?
     private var repositoryWatchPaths: [String] = []
     private var repositoryWatchSinceEventID = RepositoryWatcher.currentEventID()
     private var monitoringEnabled: Bool
@@ -3057,10 +3058,23 @@ final class RepositoryModel: ObservableObject {
               !isGeneratingCommitMessage,
               !hasPendingChangeOperations,
               !isRefreshInProgress,
-              !isLoadingMoreGraph else { return nil }
-        return await perform("Fetching…", presentsErrors: false) {
-            _ = try $0.fetch()
+              !isLoadingMoreGraph,
+              backgroundFetchTask == nil,
+              let repositoryURL else { return nil }
+        // Runs outside `perform` so a slow network does not set `isBusy` and
+        // block staging, committing, or commit message generation.
+        let client = GitClient(repositoryURL: repositoryURL, sshRepository: sshRepository)
+        let task = Task.detached(priority: .utility) {
+            (try? client.fetch()) != nil
         }
+        backgroundFetchTask = task
+        let fetched = await task.value
+        backgroundFetchTask = nil
+        guard fetched, self.repositoryURL == repositoryURL else { return fetched }
+        // Stays pending if the user is busy, so a later refresh picks it up.
+        pendingLiveRefresh = true
+        await refresh(activityMessage: "Refreshing…", blocksActions: false, presentsErrors: false)
+        return true
     }
 
     func pull() async {
@@ -3086,6 +3100,8 @@ final class RepositoryModel: ObservableObject {
     private func withSyncActivity(_ body: () async -> Void) async {
         syncActivityDepth += 1
         isSyncing = true
+        // Two fetches at once can fail to lock the same remote refs.
+        _ = await backgroundFetchTask?.value
         await body()
         syncActivityDepth -= 1
         if syncActivityDepth == 0 {
