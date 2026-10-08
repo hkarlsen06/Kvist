@@ -8,6 +8,7 @@ struct KvistApp: App {
     @StateObject private var tabsModel: WorkspaceTabsModel
     @StateObject private var themePreferences: ThemePreferences
     @State private var hasPresentedInitialFrame = false
+    @Environment(\.openWindow) private var openWindow
 
     init() {
         // Writing to a child process whose stdin has closed, such as an `ssh` that
@@ -214,6 +215,13 @@ struct KvistApp: App {
                 Divider()
             }
 
+            CommandGroup(after: .windowArrangement) {
+                Button("Repositories") {
+                    openWindow(id: "repositories")
+                }
+                .keyboardShortcut("0")
+            }
+
             CommandGroup(after: .toolbar) {
                 Button("Close Editor Panel") {
                     tabsModel.activeModel.closeEditorPanel()
@@ -295,6 +303,17 @@ struct KvistApp: App {
                 }
             }
         }
+
+        Window("Repositories", id: "repositories") {
+            RepositoryOverviewView()
+                .id(themePreferences.appearanceStamp)
+                .environmentObject(tabsModel)
+                .environmentObject(tabsModel.checkoutRegistry)
+                .preferredColorScheme(themePreferences.preferredColorScheme)
+                .tint(AppTheme.actionBlue)
+                .frame(minWidth: 640, minHeight: 360)
+        }
+        .defaultSize(width: 900, height: 640)
 
         Settings {
             if hasPresentedInitialFrame {
@@ -390,7 +409,7 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private struct WindowConfigurator: NSViewRepresentable {
+struct WindowConfigurator: NSViewRepresentable {
     @MainActor static weak var mainWindow: NSWindow?
     let didDisplayInitialFrame: () -> Void
 
