@@ -17,7 +17,9 @@ struct RepositoryWorktreeBar: View {
     }
 
     var body: some View {
-        if tab.repositoryURL != nil, !model.isPlainFolder {
+        // A tab still connecting to its SSH checkout has no URL yet, but
+        // keeps the bar so the switch does not move the layout.
+        if tab.repositoryURL != nil || tab.checkout != nil, !model.isPlainFolder {
             let checkouts = tabsModel.checkouts(shownWith: tab)
             let group = tabsModel.group(of: tab)
             let listed = group.flatMap(\.worktrees)
@@ -91,10 +93,11 @@ struct RepositoryWorktreeBar: View {
         }
     }
 
-    /// The current checkout reads from its live model, which is never stale.
-    /// Others use the registry's last status, then their open tab's model.
+    /// The current checkout reads from its live model once it has loaded,
+    /// since that is never stale. Others, and the current one while it
+    /// loads, use the registry's last status, then their open tab's model.
     private func state(of checkout: Checkout, isCurrent: Bool) -> CheckoutBarState? {
-        if isCurrent { return CheckoutBarState(model: model) }
+        if isCurrent, model.repositoryURL != nil { return CheckoutBarState(model: model) }
         if let status = registry.statuses[checkout.id] { return CheckoutBarState(status: status) }
         if let other = tabsModel.tabs.first(where: { $0.shows(checkout.worktree) })?.loadedModel,
            other.repositoryURL != nil {

@@ -650,6 +650,19 @@ final class WorkspaceTabsModelTests: XCTestCase {
             tabsModel.checkouts(shownWith: firstTab).map(\.host),
             [nil, nil, "alpha", "zeta"]
         )
+
+        // A tab connecting to its SSH checkout is named, loading, and in
+        // its group before the host answers.
+        let remote = Checkout(host: "kvist-test.invalid", path: "/srv/x", origin: "github.com/me/x")
+        tabsModel.open(remote)
+        let remoteTab = tabsModel.activeTab
+        XCTAssertEqual(remoteTab.displayName, "x")
+        XCTAssertTrue(remoteTab.isRepositoryLoadPending)
+        XCTAssertEqual(remoteTab.checkout?.id, remote.id)
+        XCTAssertTrue(remoteTab.shows(remote.worktree))
+        XCTAssertEqual(tabsModel.topLevelTabs.count, 2)
+        tabsModel.open(remote)
+        XCTAssertEqual(tabsModel.tabs.count, 4)
     }
 
     func testCloseOthersKeepsOnlyTheGivenTab() {

@@ -28,18 +28,25 @@ final class RepositoryTab: ObservableObject, Identifiable {
     /// machines. Saved with the workspace so restored tabs group before they
     /// load, and nil until Kvist reads the remotes.
     fileprivate(set) var origin: String?
+    /// The SSH checkout this tab opens, until the model has loaded it and
+    /// `repositoryPath` names the mirror. It names the tab and keeps the
+    /// checkout bar on screen while Kvist connects.
+    private var pendingRemote: Checkout?
+    private var isOpeningRemote = false
 
     init(
         id: UUID = UUID(),
         repositoryURL: URL? = nil,
         restorationState: RepositoryRestorationState? = nil,
         worktrees: [GitWorktree] = [],
-        origin: String? = nil
+        origin: String? = nil,
+        remote: Checkout? = nil
     ) {
         self.id = id
         repositoryPath = repositoryURL?.standardizedFileURL.path
+        pendingRemote = remote
         pendingRestorationState = restorationState
-        isRepositoryLoadPending = repositoryURL != nil
+        isRepositoryLoadPending = repositoryURL != nil || remote != nil
         self.worktrees = worktrees
         self.origin = origin
     }
@@ -55,7 +62,9 @@ final class RepositoryTab: ObservableObject, Identifiable {
     /// The folder this tab shows, on this Mac or on an SSH host. An SSH
     /// tab's own path is a local mirror, which this never returns.
     var checkout: Checkout? {
-        guard let repositoryPath else { return nil }
+        guard let repositoryPath else {
+            return pendingRemote.map { Checkout(host: $0.host, path: $0.path, origin: origin) }
+        }
         let remote = storedModel?.sshRepository
             ?? SSHRepository.mirrored(at: URL(fileURLWithPath: repositoryPath, isDirectory: true))
         if let remote {
@@ -105,7 +114,9 @@ final class RepositoryTab: ObservableObject, Identifiable {
     }
 
     func shows(_ worktree: GitWorktree) -> Bool {
-        guard let repositoryPath else { return false }
+        guard let repositoryPath else {
+            return pendingRemote.map { $0.isSame(as: worktree) } ?? false
+        }
         guard let sshHost = worktree.sshHost else {
             return repositoryPath == worktree.url.standardizedFileURL.path
         }
@@ -129,7 +140,7 @@ final class RepositoryTab: ObservableObject, Identifiable {
         if let repositoryPath {
             return URL(fileURLWithPath: repositoryPath).lastPathComponent
         }
-        return "New"
+        return pendingRemote?.name ?? "New"
     }
 
     fileprivate func activate() {
@@ -139,6 +150,20 @@ final class RepositoryTab: ObservableObject, Identifiable {
             return
         }
         guard !model.isBusy else { return }
+        if model.repositoryURL == nil, repositoryPath == nil,
+           let remote = pendingRemote, let host = remote.host {
+            // Switching away leaves the connection running, as for a clone,
+            // so this task is not the cancellable activation task.
+            guard !isOpeningRemote else { return }
+            isOpeningRemote = true
+            isRepositoryLoadPending = true
+            Task { [weak self, weak model] in
+                await model?.openSSHRepository(host: host, path: remote.path)
+                self?.isOpeningRemote = false
+                self?.isRepositoryLoadPending = false
+            }
+            return
+        }
         let repositoryURL: URL?
         if let deferredRepositoryOpenURL = model.deferredRepositoryOpenURL {
             repositoryURL = deferredRepositoryOpenURL
@@ -190,7 +215,7 @@ final class RepositoryTab: ObservableObject, Identifiable {
         model.setMonitoringEnabled(false)
         isRepositoryLoadPending = model.repositoryURL == nil
             && model.repositoryInitializationURL == nil
-            && repositoryPath != nil
+            && (repositoryPath != nil || isOpeningRemote)
     }
 
     fileprivate var restorationState: RepositoryRestorationState {
@@ -532,16 +557,15 @@ final class WorkspaceTabsModel: ObservableObject {
         let tab = RepositoryTab(
             repositoryURL: worktree.sshHost == nil ? worktree.url : nil,
             worktrees: sharesWorktrees ? activeTab.worktrees : [],
-            origin: origin
+            origin: origin,
+            // Activating the tab connects to the host.
+            remote: worktree.sshHost == nil ? nil : Checkout(worktree: worktree)
         )
         let index = tabs.lastIndex { tab in anchor.contains { $0 === tab } } ?? tabs.count - 1
         tabs.insert(tab, at: index + 1)
         observeRepository(tab)
         activeTabID = tab.id
         persistTabs()
-        if let sshHost = worktree.sshHost {
-            Task { await tab.model.openSSHRepository(host: sshHost, path: worktree.path) }
-        }
     }
 
     /// The checkouts to list under the tab row for the tab's repository, this
