@@ -13,21 +13,26 @@ struct PickerRepository: Identifiable, Equatable {
     let preferred: Checkout
     /// Position in the recent list, or nil when never opened recently.
     let recentRank: Int?
-    /// Another repository in the list has the same name, so labels name
+    /// Another repository in the list has the same name, so the row shows
     /// the parent folder.
     var sharesName = false
 
     var isLocal: Bool { checkouts.contains { $0.host == nil } }
 
-    /// The machine name, with the folder name when the folder differs from
-    /// the repository's name or one machine has several checkouts, and the
-    /// parent folder when another repository has the same name.
-    func label(for checkout: Checkout) -> String {
-        if sharesName {
-            let parent = (checkout.path as NSString).deletingLastPathComponent
-            let shown = checkout.host == nil ? (parent as NSString).abbreviatingWithTildeInPath : parent
-            return "\(checkout.machineName) · \(shown)"
+    /// The preferred checkout's parent folder, when another repository in
+    /// the list has the same name.
+    var detail: String? {
+        guard sharesName else { return nil }
+        let parent = (preferred.path as NSString).deletingLastPathComponent
+        guard let host = preferred.host else {
+            return (parent as NSString).abbreviatingWithTildeInPath
         }
+        return "\(host):\(parent)"
+    }
+
+    /// The machine name, with the folder name when the folder differs from
+    /// the repository's name or one machine has several checkouts.
+    func label(for checkout: Checkout) -> String {
         let sameMachine = checkouts.filter { $0.host == checkout.host }
         guard checkout.name != name || sameMachine.count > 1 else { return checkout.machineName }
         return "\(checkout.machineName) · \(checkout.name)"
@@ -277,10 +282,20 @@ struct PickerRepositoryRow: View {
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(repository.name)
-                    .font(AppType.rowDetail)
-                    .foregroundStyle(AppTheme.primary)
-                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(repository.name)
+                        .font(AppType.rowDetail)
+                        .foregroundStyle(AppTheme.primary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    if let detail = repository.detail {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.muted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
 
                 // A plain HStack clips long lists of machines instead of
                 // wrapping, so the row keeps one height.
