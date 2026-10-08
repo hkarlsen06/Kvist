@@ -38,13 +38,6 @@ struct PickerRepository: Identifiable, Equatable {
         return "\(checkout.machineName) · \(checkout.name)"
     }
 
-    /// Git's answer when the folder of a checkout no longer exists or no
-    /// longer holds the repository, as opposed to an unreachable host.
-    static func isGone(_ failure: String?) -> Bool {
-        guard let failure else { return false }
-        return ["No such file or directory", "The folder is missing", "no longer the top of a Git repository"]
-            .contains { failure.contains($0) }
-    }
 
     /// Merges recent, registered, and discovered checkouts into repositories.
     /// Recently used repositories come first, the rest by name. A non-empty
@@ -144,7 +137,7 @@ struct RepositoryPickerList: View {
     }
 
     private var recent: [Checkout] {
-        allRecent.filter { !PickerRepository.isGone(registry.failures[$0.id]) }
+        allRecent.filter { !CheckoutRegistry.isGone(registry.failures[$0.id]) }
     }
 
     /// Local checkouts whose folder is gone are left out, as recents are,
@@ -152,7 +145,7 @@ struct RepositoryPickerList: View {
     private var known: [Checkout] {
         (registry.checkouts + hosts.discovered).filter {
             ($0.host != nil || FileManager.default.fileExists(atPath: $0.path))
-                && !PickerRepository.isGone(registry.failures[$0.id])
+                && !CheckoutRegistry.isGone(registry.failures[$0.id])
         }
     }
 

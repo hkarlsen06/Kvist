@@ -513,6 +513,12 @@ final class WorkspaceTabsModelTests: XCTestCase {
         tabsModel.select(linkedTab.id)
         await waitForRepositoryLoad(in: linkedTab)
         let linked = try XCTUnwrap(linkedTab.model.worktrees.first { $0.branch == "feature" })
+        let linkedID = Checkout(worktree: linked).id
+        let registered = Date().addingTimeInterval(5)
+        while tabsModel.checkoutRegistry.checkout(id: linkedID) == nil, Date() < registered {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertNotNil(tabsModel.checkoutRegistry.checkout(id: linkedID))
 
         tabsModel.removeWorktree(linked)
         let deadline = Date().addingTimeInterval(5)
@@ -523,6 +529,8 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.tabs.map(\.id), [mainTab.id])
         XCTAssertEqual(tabsModel.activeTabID, mainTab.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: linkedURL.path))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(tabsModel.checkoutRegistry.checkout(id: linkedID))
     }
 
     func testWorktreeTabsShareOneTopLevelEntryThatMovesClosesAndRestoresTogether() async throws {

@@ -94,8 +94,8 @@ final class CheckoutTests: XCTestCase {
         let named = PickerRepository.list(recent: [], known: [local, folder])
         XCTAssertEqual(named.map(\.detail), ["/code", "/other"])
         XCTAssertNil(list[0].detail)
-        XCTAssertTrue(PickerRepository.isGone("fatal: cannot change to '/srv/x': No such file or directory"))
-        XCTAssertFalse(PickerRepository.isGone("ssh: connect to host devbox port 22: Operation timed out"))
+        XCTAssertTrue(CheckoutRegistry.isGone("fatal: cannot change to '/srv/x': No such file or directory"))
+        XCTAssertFalse(CheckoutRegistry.isGone("ssh: connect to host devbox port 22: Operation timed out"))
     }
 
     @MainActor
@@ -114,5 +114,21 @@ final class CheckoutTests: XCTestCase {
 
         model.remove("devbox")
         XCTAssertTrue(SSHHostsModel(defaults: defaults).discovered.isEmpty)
+    }
+
+    @MainActor
+    func testRefreshForgetsCheckoutsWhoseFolderIsGone() async {
+        let defaults = UserDefaults(suiteName: "CheckoutTests-\(UUID().uuidString)")!
+        let registry = CheckoutRegistry(defaults: defaults)
+        let deleted = Checkout(host: nil, path: "/tmp/kvist-deleted-\(UUID().uuidString)")
+        let unplugged = Checkout(host: nil, path: "/Volumes/KvistMissing-\(UUID().uuidString)/x")
+        registry.register(deleted)
+        registry.register(unplugged)
+
+        await registry.refresh([deleted, unplugged])
+
+        XCTAssertEqual(registry.checkouts.map(\.id), [unplugged.id])
+        XCTAssertTrue(CheckoutRegistry.isGone(registry.failures[deleted.id]))
+        XCTAssertEqual(CheckoutRegistry(defaults: defaults).checkouts.map(\.id), [unplugged.id])
     }
 }

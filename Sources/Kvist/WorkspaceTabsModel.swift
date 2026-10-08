@@ -668,6 +668,9 @@ final class WorkspaceTabsModel: ObservableObject {
         let model = activeModel
         let affectedTabs = tabs.filter { $0.shows(worktree) }
         guard affectedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
+        // Before the folder goes, since standardizing a path only drops
+        // `/private` while the path exists.
+        let checkoutID = Checkout(worktree: worktree).id
         Task {
             guard await model.removeWorktree(worktree) else { return }
             if affectedTabs.contains(where: { $0.id == activeTabID }),
@@ -675,6 +678,9 @@ final class WorkspaceTabsModel: ObservableObject {
                 switchToWorktree(remaining)
             }
             closeTabs(affectedTabs)
+            // After the tabs close, so the removed worktree's own tab
+            // cannot register it again.
+            checkoutRegistry.remove(checkoutID)
         }
     }
 
@@ -921,10 +927,17 @@ final class WorkspaceTabsModel: ObservableObject {
     }
 
     private func registerCheckouts(of model: RepositoryModel, for tab: RepositoryTab) {
-        guard model.repositoryURL != nil, !model.isPlainFolder else { return }
+        // A closed tab's last update can arrive after it closed, such as
+        // when its worktree was just removed.
+        guard tabs.contains(where: { $0 === tab }),
+              model.repositoryURL != nil, !model.isPlainFolder else { return }
         let origin = Self.origin(of: model.remotes)
-        // Git lists the main worktree first, so register in that order.
-        let listed = model.worktrees.map { Checkout(worktree: $0, origin: origin) }
+        // Git lists the main worktree first, so register in that order. A
+        // tab's list is stale until it refreshes, so skip local folders that
+        // are gone, such as a worktree another tab just removed.
+        let listed = model.worktrees
+            .filter { $0.sshHost != nil || FileManager.default.fileExists(atPath: $0.path) }
+            .map { Checkout(worktree: $0, origin: origin) }
         let own: Checkout?
         if let remote = model.sshRepository {
             own = Checkout(host: remote.host, path: remote.path, origin: origin)

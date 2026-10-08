@@ -131,6 +131,14 @@ final class CheckoutRegistry: ObservableObject {
         persist()
     }
 
+    /// Git's answer when the folder of a checkout no longer exists or no
+    /// longer holds the repository, as opposed to an unreachable host.
+    nonisolated static func isGone(_ failure: String?) -> Bool {
+        guard let failure else { return false }
+        return ["No such file or directory", "The folder is missing", "no longer the top of a Git repository"]
+            .contains { failure.contains($0) }
+    }
+
     func remove(_ id: Checkout.ID) {
         checkouts.removeAll { $0.id == id }
         statuses[id] = nil
@@ -171,9 +179,18 @@ final class CheckoutRegistry: ObservableObject {
                         failures[id] = nil
                         register(Checkout(host: host, path: path, origin: status.origin))
                     case .failure(let error):
-                        failures[id] = (error as? GitCommandError)?.output
+                        let failure = (error as? GitCommandError)?.output
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                             ?? error.localizedDescription
+                        failures[id] = failure
+                        // A deleted folder leaves the list. The failure stays,
+                        // so recents that point there stay hidden. A folder
+                        // on an external drive may only be unplugged.
+                        if Self.isGone(failure), host != nil || !path.hasPrefix("/Volumes/") {
+                            checkouts.removeAll { $0.id == id }
+                            statuses[id] = nil
+                            persist()
+                        }
                     }
                 }
             }
