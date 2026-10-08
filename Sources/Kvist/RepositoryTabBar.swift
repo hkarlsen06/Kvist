@@ -4,7 +4,7 @@ import SwiftUI
 struct RepositoryTopBar: View {
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
     @State private var pendingTabScroll: DispatchWorkItem?
-    @StateObject private var dragState = TabDragState()
+    @StateObject private var dragState = TabDragState<UUID>()
 
     /// Coordinate space of the whole bar; tab frames are reported in it so
     /// the AppKit drag area behind the bar can hit-test tabs for ⌘-drag.
@@ -122,28 +122,33 @@ struct RepositoryTopBar: View {
 
 /// Live state of an in-progress tab drag. The event monitor in
 /// `WindowDragArea` writes to it; the tab items read it to render the dragged
-/// tab under the pointer and slide its neighbors aside. The model's order is
+/// tab under the pointer and slide its neighbors aside. The checkout bar
+/// uses it too, driven by a drag gesture. The model's order is
 /// untouched until the drop, so the layout (and the tab frames captured at
 /// drag start) stays stable for the whole gesture.
 @MainActor
-final class TabDragState: ObservableObject {
-    @Published private(set) var draggedTabID: UUID?
+final class TabDragState<ID: Hashable>: ObservableObject {
+    @Published private(set) var draggedTabID: ID?
     @Published private(set) var pointerX: CGFloat = 0
     private var grabOffsetX: CGFloat = 0
-    private var frames: [UUID: CGRect] = [:]
-    private var order: [UUID] = []
+    private var frames: [ID: CGRect] = [:]
+    private var order: [ID] = []
 
-    /// Spacing of the tab strip's HStack; a neighbor making room for the
+    /// Spacing of the strip's HStack; a neighbor making room for the
     /// dragged tab moves by the tab's width plus this.
-    private let stripSpacing: CGFloat = 3
+    private let stripSpacing: CGFloat
+
+    init(stripSpacing: CGFloat = 3) {
+        self.stripSpacing = stripSpacing
+    }
 
     var isDragging: Bool { draggedTabID != nil }
 
     func begin(
-        tabID: UUID,
+        tabID: ID,
         pointerX: CGFloat,
-        frames: [UUID: CGRect],
-        order: [UUID]
+        frames: [ID: CGRect],
+        order: [ID]
     ) {
         guard let frame = frames[tabID] else { return }
         self.frames = frames
@@ -185,7 +190,7 @@ final class TabDragState: ObservableObject {
     /// Visual x-offset for a tab while a drag is in progress. The dragged
     /// tab tracks the pointer; a neighbor shifts one slot when it is between
     /// the dragged tab's original index and its current target index.
-    func offsetX(for tabID: UUID) -> CGFloat {
+    func offsetX(for tabID: ID) -> CGFloat {
         guard let draggedTabID,
               let draggedFrame = frames[draggedTabID],
               let draggedIndex = order.firstIndex(of: draggedTabID) else {
@@ -230,14 +235,14 @@ final class TabDragState: ObservableObject {
 struct WindowDragArea: NSViewRepresentable {
     var orderedTabIDs: [UUID]
     var tabFrames: [UUID: CGRect]
-    var dragState: TabDragState
+    var dragState: TabDragState<UUID>
     var selectTab: (UUID) -> Void
     var moveTab: (UUID, Int) -> Void
 
     final class DragView: NSView {
         var orderedTabIDs: [UUID] = []
         var tabFrames: [UUID: CGRect] = [:]
-        var dragState: TabDragState?
+        var dragState: TabDragState<UUID>?
         var selectTab: ((UUID) -> Void)?
         var moveTab: ((UUID, Int) -> Void)?
         private var reorderMonitor: Any?
@@ -442,14 +447,14 @@ struct ActiveTabOutline: Shape {
 struct RepositoryTabItem: View {
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
     @ObservedObject var tab: RepositoryTab
-    @ObservedObject var dragState: TabDragState
+    @ObservedObject var dragState: TabDragState<UUID>
     let tabID: UUID
     let tabName: String
     let isActive: Bool
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(tab: RepositoryTab, isActive: Bool, dragState: TabDragState) {
+    init(tab: RepositoryTab, isActive: Bool, dragState: TabDragState<UUID>) {
         _tab = ObservedObject(wrappedValue: tab)
         _dragState = ObservedObject(wrappedValue: dragState)
         tabID = tab.id

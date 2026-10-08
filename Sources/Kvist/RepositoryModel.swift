@@ -280,6 +280,9 @@ final class RepositoryModel: ObservableObject {
     var restorationStateDidChange: (() -> Void)?
     /// Set by the workspace to show another worktree of this repository.
     var switchToWorktree: ((GitWorktree) -> Void)?
+    /// Set by the workspace to remove a worktree and close its tabs. The
+    /// flag forces removal of a worktree with changes.
+    var removeWorktreeAndTabs: ((GitWorktree, Bool) async -> Bool)?
 
     init(
         initialRepositoryURL: URL? = nil,
@@ -3429,16 +3432,24 @@ final class RepositoryModel: ObservableObject {
             errorMessage = "Only branches can be deleted with this action."
             return false
         }
-        let kind = reference.kind == .remoteBranch ? "Remote Branch" : "Branch"
-        let result = AppDialog.run(
-            title: "Delete \(kind)?",
-            message: "Delete \(reference.name)?",
-            actions: [
-                AppDialogAction(title: "Cancel", role: .cancel),
-                AppDialogAction(title: "Delete", role: .destructive)
-            ]
-        )
-        guard result.actionIndex == 1 else { return false }
+        // Git refuses to delete a branch that a worktree has checked out.
+        // A linked worktree other than this one can be removed first.
+        if reference.kind == .localBranch,
+           let worktree = worktrees.dropFirst().first(where: { $0.branch == reference.name }),
+           !isCurrentWorktree(worktree) {
+            guard await removeWorktree(holding: reference, worktree) else { return false }
+        } else {
+            let kind = reference.kind == .remoteBranch ? "Remote Branch" : "Branch"
+            let result = AppDialog.run(
+                title: "Delete \(kind)?",
+                message: "Delete \(reference.name)?",
+                actions: [
+                    AppDialogAction(title: "Cancel", role: .cancel),
+                    AppDialogAction(title: "Delete", role: .destructive)
+                ]
+            )
+            guard result.actionIndex == 1 else { return false }
+        }
         guard reference.kind == .localBranch else {
             return await deleteBranch(reference)
         }
@@ -4094,8 +4105,58 @@ final class RepositoryModel: ObservableObject {
         return worktrees.first { $0.branch == branch }
     }
 
-    /// Removes another worktree's folder. The branch stays.
-    func removeWorktree(_ worktree: GitWorktree) async -> Bool {
+    /// Shows the short status of the worktree that has the branch checked
+    /// out, and removes the worktree if the user agrees.
+    private func removeWorktree(holding reference: GitReference, _ worktree: GitWorktree) async -> Bool {
+        let repositoryURL = repositoryURL ?? worktree.url
+        let status: String? = await Task.detached(priority: .userInitiated) {
+            try? Self.client(for: worktree, repositoryURL: repositoryURL)
+                .run(["status", "--short"])
+        }.value
+        let lines = status?.split(whereSeparator: \.isNewline) ?? []
+        let statusText: String
+        if status == nil {
+            statusText = "Kvist could not read its status."
+        } else if lines.isEmpty {
+            statusText = "It has no changes."
+        } else {
+            let shown = lines.prefix(12).joined(separator: "\n")
+            let more = lines.count > 12 ? "\nand \(lines.count - 12) more" : ""
+            statusText = "Removing it deletes these changes:\n\n\(shown)\(more)"
+        }
+        let hasChanges = !lines.isEmpty
+        let result = AppDialog.run(
+            title: "Branch Is Checked Out in a Worktree",
+            message: "Git cannot delete \(reference.name) while the worktree at \(Checkout(worktree: worktree).location) has it checked out. \(statusText)\n\nRemove the worktree, then delete the branch?",
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(
+                    title: hasChanges ? "Remove with Changes & Delete" : "Remove Worktree & Delete",
+                    role: .destructive
+                )
+            ]
+        )
+        guard result.actionIndex == 1 else { return false }
+        if let removeWorktreeAndTabs {
+            return await removeWorktreeAndTabs(worktree, hasChanges)
+        }
+        return await removeWorktree(worktree, force: hasChanges)
+    }
+
+    /// A client that runs Git in the worktree. An SSH worktree runs over
+    /// SSH, so `repositoryURL` is only a placeholder there.
+    private nonisolated static func client(for worktree: GitWorktree, repositoryURL: URL) throws -> GitClient {
+        GitClient(
+            repositoryURL: worktree.sshHost == nil ? worktree.url : repositoryURL,
+            sshRepository: try worktree.sshHost.map {
+                try SSHRepository(host: $0, path: worktree.path)
+            }
+        )
+    }
+
+    /// Removes another worktree's folder. The branch stays. `force` removes
+    /// a worktree with changes without asking.
+    func removeWorktree(_ worktree: GitWorktree, force: Bool = false) async -> Bool {
         // Run from a worktree that stays, since this one may be the one
         // removed.
         guard let base = worktrees.first(where: { $0.path != worktree.path }) else {
@@ -4105,7 +4166,7 @@ final class RepositoryModel: ObservableObject {
         do {
             do {
                 try await run(in: base, "Removing \(worktree.name)…") {
-                    try $0.removeWorktree(path: worktree.path)
+                    try $0.removeWorktree(path: worktree.path, force: force)
                 }
             } catch let error as GitCommandError where error.output.contains("--force") {
                 let result = AppDialog.run(
@@ -4169,12 +4230,7 @@ final class RepositoryModel: ObservableObject {
               !isBusy,
               !isSavingRepositoryFile,
               !isGeneratingCommitMessage else { throw CancellationError() }
-        let client = GitClient(
-            repositoryURL: worktree.sshHost == nil ? worktree.url : repositoryURL,
-            sshRepository: try worktree.sshHost.map {
-                try SSHRepository(host: $0, path: worktree.path)
-            }
-        )
+        let client = try Self.client(for: worktree, repositoryURL: repositoryURL)
         isBusy = true
         activity = message
         defer { isBusy = false }

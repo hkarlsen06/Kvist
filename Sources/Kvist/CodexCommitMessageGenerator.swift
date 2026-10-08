@@ -347,15 +347,15 @@ struct AICommitMessageGenerator: Sendable {
             if let response = try? decoder.decode(CommitMessageResponse.self, from: candidate) {
                 return response.message
             }
-            if let envelope = try? decoder.decode(ClaudeCommandResponse.self, from: candidate) {
-                if let response = envelope.structuredOutput {
-                    return response.message
-                }
-                if let result = envelope.result,
-                   let resultData = result.data(using: .utf8),
-                   let response = try? decoder.decode(CommitMessageResponse.self, from: resultData) {
-                    return response.message
-                }
+            if let envelope = try? decoder.decode(ClaudeCommandResponse.self, from: candidate),
+               let message = envelope.message(using: decoder) {
+                return message
+            }
+            // With verbose output, which Claude settings can turn on, the
+            // CLI prints every event as one array. The result comes last.
+            if let events = try? decoder.decode([ClaudeCommandResponse].self, from: candidate),
+               let message = events.reversed().lazy.compactMap({ $0.message(using: decoder) }).first {
+                return message
             }
         }
         throw AICommitMessageError.invalidResponse(
@@ -838,6 +838,14 @@ private struct ClaudeCommandResponse: Decodable {
     enum CodingKeys: String, CodingKey {
         case result
         case structuredOutput = "structured_output"
+    }
+
+    func message(using decoder: JSONDecoder) -> String? {
+        if let structuredOutput {
+            return structuredOutput.message
+        }
+        guard let resultData = result?.data(using: .utf8) else { return nil }
+        return (try? decoder.decode(CommitMessageResponse.self, from: resultData))?.message
     }
 }
 

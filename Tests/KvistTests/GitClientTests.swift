@@ -2435,6 +2435,48 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(message, "feat: support Claude messages")
     }
 
+    func testAICommitGeneratorReadsClaudeVerboseEventArray() throws {
+        let claudeURL = repositoryURL.appendingPathComponent("verbose-claude")
+        try "staged\n".write(
+            to: repositoryURL.appendingPathComponent("staged.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try GitClient(repositoryURL: repositoryURL).stageAll()
+
+        // Verbose output prints every event as one array, with the result last.
+        try """
+        #!/bin/sh
+        if [ "$1" = "--help" ]; then
+          echo "--print --json-schema"
+          exit 0
+        fi
+        cat > /dev/null
+        printf '[{"type":"system","subtype":"init","tools":["StructuredOutput"]},'
+        printf '{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"message":"draft"}}]}},'
+        printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"{\\"message\\":\\"feat: read verbose output\\"}","structured_output":{"message":"feat: read verbose output"}}]'
+        """ .write(
+            to: claudeURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: claudeURL.path
+        )
+
+        let message = try AICommitMessageGenerator(
+            configuration: AICommitMessageConfiguration(
+                provider: .claude,
+                model: "opus",
+                commandTemplate: AICommitMessageProvider.claude.defaultCommandTemplate
+            ),
+            candidateURLs: [claudeURL]
+        ).generate(in: repositoryURL)
+
+        XCTAssertEqual(message, "feat: read verbose output")
+    }
+
     func testAICommitGeneratorAcceptsWordySingleLineSubject() throws {
         let codexURL = repositoryURL.appendingPathComponent("wordy-response-codex")
         let expectedMessage = "Add configurable Codex and Claude commit-message generation from staged diffs with model catalogs, reasoning controls, command templates, provider-specific consent and privacy docs, GitHub pull-request links, expanded tests, and Git feature backlog"

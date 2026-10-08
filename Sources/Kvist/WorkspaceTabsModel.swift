@@ -279,6 +279,9 @@ final class WorkspaceTabsModel: ObservableObject {
         didSet { activeTabDidChange(from: oldValue) }
     }
     @Published private(set) var recentRepositoryPaths: [String] = []
+    /// Checkout IDs in the order the user dragged them into in the checkout
+    /// bar. Checkouts not listed follow, in the default order.
+    @Published private(set) var checkoutOrder: [Checkout.ID] = []
     /// Every checkout of every repository, across this Mac and SSH hosts.
     let checkoutRegistry: CheckoutRegistry
     /// SSH hosts and the repositories scans found on every machine.
@@ -293,6 +296,7 @@ final class WorkspaceTabsModel: ObservableObject {
     private let legacyRepositoryKey = "lastRepositoryPath"
     private let recentRepositoriesKey = "recentRepositoryPaths"
     private let restoredWorkspaceKey = "restoredWorkspaceV2"
+    private let checkoutOrderKey = "checkoutOrder"
     private let recentRepositoriesLimit = 7
     private var repositorySubscriptions: [UUID: [AnyCancellable]] = [:]
     /// The tab each worktree group showed last, so its top-row entry returns
@@ -325,6 +329,7 @@ final class WorkspaceTabsModel: ObservableObject {
         // Keep entries whose folder is missing, such as on an unmounted
         // volume. recentRepositoryURLs hides them until the folder returns.
         recentRepositoryPaths = defaults.stringArray(forKey: recentRepositoriesKey) ?? []
+        checkoutOrder = defaults.stringArray(forKey: checkoutOrderKey) ?? []
 
         let restoredWorkspace = restoreSavedTabs
             ? defaults.data(forKey: restoredWorkspaceKey).flatMap {
@@ -571,9 +576,10 @@ final class WorkspaceTabsModel: ObservableObject {
         persistTabs()
     }
 
-    /// The checkouts to list under the tab row for the tab's repository, this
-    /// Mac first, then SSH hosts by name. Within a machine the main worktree
-    /// comes first. The list joins the registry's clones of the repository
+    /// The checkouts to list under the tab row for the tab's repository, in
+    /// the order the user dragged them into. Otherwise this Mac comes first,
+    /// then SSH hosts by name, and within a machine the main worktree comes
+    /// first. The list joins the registry's clones of the repository
     /// with the worktrees that open tabs know about.
     func checkouts(shownWith tab: RepositoryTab) -> [Checkout] {
         let members = group(of: tab)
@@ -591,9 +597,11 @@ final class WorkspaceTabsModel: ObservableObject {
         }
         var seen = Set<Checkout.ID>()
         let unique = found.filter { seen.insert($0.id).inserted }
+        let order = checkoutOrder
         return unique.enumerated().sorted { first, second in
-            func key(_ item: (offset: Int, element: Checkout)) -> (Int, String, Int, Int) {
+            func key(_ item: (offset: Int, element: Checkout)) -> (Int, Int, String, Int, Int) {
                 (
+                    order.firstIndex(of: item.element.id) ?? .max,
                     item.element.host == nil ? 0 : 1,
                     item.element.host ?? "",
                     mainIDs.contains(item.element.id) ? 0 : 1,
@@ -602,6 +610,21 @@ final class WorkspaceTabsModel: ObservableObject {
             }
             return key(first) < key(second)
         }.map(\.element)
+    }
+
+    /// Moves a checkout in the bar under the tab row to `targetIndex`, and
+    /// remembers the bar's order.
+    func moveCheckout(_ id: Checkout.ID, toIndex targetIndex: Int, shownWith tab: RepositoryTab) {
+        var ids = checkouts(shownWith: tab).map(\.id)
+        guard let from = ids.firstIndex(of: id) else { return }
+        let to = min(max(targetIndex, 0), ids.count - 1)
+        guard from != to else { return }
+        ids.insert(ids.remove(at: from), at: to)
+        // ponytail: IDs of forgotten checkouts stay listed. Prune them if the list grows large.
+        checkoutOrder = checkoutOrder.filter { !ids.contains($0) } + ids
+        if persistenceEnabled {
+            defaults.set(checkoutOrder, forKey: checkoutOrderKey)
+        }
     }
 
     /// Creates a worktree of the checkout's repository on the checkout's
@@ -663,25 +686,26 @@ final class WorkspaceTabsModel: ObservableObject {
     }
 
     /// Removes a worktree of the active repository and closes its tabs,
-    /// moving to another worktree first if the active tab shows it.
-    func removeWorktree(_ worktree: GitWorktree) {
+    /// moving to another worktree first if the active tab shows it. `force`
+    /// removes it with its changes without asking again.
+    @discardableResult
+    func removeWorktree(_ worktree: GitWorktree, force: Bool = false) async -> Bool {
         let model = activeModel
         let affectedTabs = tabs.filter { $0.shows(worktree) }
-        guard affectedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
+        guard affectedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return false }
         // Before the folder goes, since standardizing a path only drops
         // `/private` while the path exists.
         let checkoutID = Checkout(worktree: worktree).id
-        Task {
-            guard await model.removeWorktree(worktree) else { return }
-            if affectedTabs.contains(where: { $0.id == activeTabID }),
-               let remaining = model.worktrees.first(where: { $0.path != worktree.path }) {
-                switchToWorktree(remaining)
-            }
-            closeTabs(affectedTabs)
-            // After the tabs close, so the removed worktree's own tab
-            // cannot register it again.
-            checkoutRegistry.remove(checkoutID)
+        guard await model.removeWorktree(worktree, force: force) else { return false }
+        if affectedTabs.contains(where: { $0.id == activeTabID }),
+           let remaining = model.worktrees.first(where: { $0.path != worktree.path }) {
+            switchToWorktree(remaining)
         }
+        closeTabs(affectedTabs)
+        // After the tabs close, so the removed worktree's own tab
+        // cannot register it again.
+        checkoutRegistry.remove(checkoutID)
+        return true
     }
 
     func select(_ tabID: UUID) {
@@ -875,6 +899,9 @@ final class WorkspaceTabsModel: ObservableObject {
 
     private func observeRepositoryModel(_ model: RepositoryModel, for tab: RepositoryTab) {
         model.switchToWorktree = { [weak self] in self?.switchToWorktree($0) }
+        model.removeWorktreeAndTabs = { [weak self] in
+            await self?.removeWorktree($0, force: $1) ?? false
+        }
         repositorySubscriptions[tab.id] = [
             model.$repositoryURL
                 .dropFirst()

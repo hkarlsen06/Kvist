@@ -10,6 +10,10 @@ struct RepositoryWorktreeBar: View {
     @ObservedObject private var model: RepositoryModel
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
     @EnvironmentObject private var registry: CheckoutRegistry
+    @StateObject private var dragState = TabDragState<Checkout.ID>(stripSpacing: 2)
+    @State private var checkoutFrames: [Checkout.ID: CGRect] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let coordinateSpaceName = "checkoutBar"
 
     init(tab: RepositoryTab) {
         _tab = ObservedObject(wrappedValue: tab)
@@ -50,8 +54,24 @@ struct RepositoryWorktreeBar: View {
                                 canForget: !tabsModel.isOpen(checkout)
                                     && !listed.contains { checkout.isSame(as: $0) }
                             )
+                            .modifier(CheckoutDragModifier(
+                                id: checkout.id,
+                                order: checkouts.map(\.id),
+                                frames: checkoutFrames,
+                                dragState: dragState,
+                                reduceMotion: reduceMotion,
+                                coordinateSpaceName: Self.coordinateSpaceName
+                            ) { id, index in
+                                tabsModel.moveCheckout(id, toIndex: index, shownWith: tab)
+                            })
+                            .onGeometryChange(for: CGRect.self) {
+                                $0.frame(in: .named(Self.coordinateSpaceName))
+                            } action: {
+                                checkoutFrames[checkout.id] = $0
+                            }
                         }
                     }
+                    .coordinateSpace(name: Self.coordinateSpaceName)
                     .padding(.leading, 8)
                     .frame(height: 30)
                 }
@@ -147,6 +167,62 @@ struct RepositoryWorktreeBar: View {
                 tabsModel.switchToWorktree(worktree)
             }
         }
+    }
+}
+
+/// Drags a checkout along the bar the way tabs move in the tab row. The
+/// dragged checkout follows the pointer horizontally, its neighbors slide
+/// aside, and the order changes on release.
+private struct CheckoutDragModifier: ViewModifier {
+    let id: Checkout.ID
+    let order: [Checkout.ID]
+    let frames: [Checkout.ID: CGRect]
+    @ObservedObject var dragState: TabDragState<Checkout.ID>
+    let reduceMotion: Bool
+    let coordinateSpaceName: String
+    let move: (Checkout.ID, Int) -> Void
+
+    func body(content: Content) -> some View {
+        let isDragged = dragState.draggedTabID == id
+        let offset = dragState.offsetX(for: id)
+        content
+            // The current checkout's fill is translucent, so it hides the
+            // neighbors it passes over only with the bar's color under it.
+            .background {
+                if isDragged {
+                    RoundedRectangle(cornerRadius: 5).fill(AppTheme.canvas)
+                }
+            }
+            .offset(x: offset)
+            // As in the tab row, the drop lands unanimated where the
+            // checkouts are already drawn.
+            .animation(
+                dragState.isDragging && !isDragged && !reduceMotion
+                    ? .easeInOut(duration: 0.13)
+                    : nil,
+                value: offset
+            )
+            .zIndex(isDragged ? 1 : 0)
+            .gesture(
+                DragGesture(minimumDistance: 4, coordinateSpace: .named(coordinateSpaceName))
+                    .onChanged { value in
+                        if !dragState.isDragging {
+                            dragState.begin(
+                                tabID: id,
+                                pointerX: value.startLocation.x,
+                                frames: frames,
+                                order: order
+                            )
+                        }
+                        dragState.update(pointerX: value.location.x)
+                    }
+                    .onEnded { _ in
+                        if let dragged = dragState.draggedTabID {
+                            move(dragged, dragState.targetIndex)
+                        }
+                        dragState.end()
+                    }
+            )
     }
 }
 
@@ -279,63 +355,63 @@ struct RepositoryCheckoutBarItem: View {
     }
 
     var body: some View {
-        Button {
-            tabsModel.open(checkout)
-        } label: {
-            HStack(spacing: 5) {
-                if let machine {
-                    Text(machine)
+        // A tap gesture rather than a Button, since a Button ignores clicks
+        // once the bar makes it draggable.
+        HStack(spacing: 5) {
+            if let machine {
+                Text(machine)
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.muted)
+                    .lineLimit(1)
+                Text("·")
+                    .foregroundStyle(AppTheme.muted)
+            }
+
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+
+            if let state, failure == nil {
+                if state.changes > 0 {
+                    Circle()
+                        .fill(AppTheme.modified)
+                        .frame(width: 5, height: 5)
+                        .accessibilityHidden(true)
+                }
+                if state.ahead > 0 {
+                    Text("↑\(state.ahead)")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
-                        .lineLimit(1)
-                    Text("·")
+                }
+                if state.behind > 0 {
+                    Text("↓\(state.behind)")
+                        .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)
                 }
-
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-
-                if let state, failure == nil {
-                    if state.changes > 0 {
-                        Circle()
-                            .fill(AppTheme.modified)
-                            .frame(width: 5, height: 5)
-                            .accessibilityHidden(true)
-                    }
-                    if state.ahead > 0 {
-                        Text("↑\(state.ahead)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(AppTheme.muted)
-                    }
-                    if state.behind > 0 {
-                        Text("↓\(state.behind)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(AppTheme.muted)
-                    }
-                }
             }
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background {
-                if isCurrent || hovering {
-                    RoundedRectangle(cornerRadius: 5)
-                        // Some themes derive raisedFill from the canvas, which
-                        // would hide the current checkout.
-                        .fill(isCurrent ? AppTheme.selection : AppTheme.hover)
-                }
-            }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background {
+            if isCurrent || hovering {
+                RoundedRectangle(cornerRadius: 5)
+                    // Some themes derive raisedFill from the canvas, which
+                    // would hide the current checkout.
+                    .fill(isCurrent ? AppTheme.selection : AppTheme.hover)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { tabsModel.open(checkout) }
         .foregroundStyle(isCurrent ? AppTheme.primary : AppTheme.secondary)
         .opacity(failure == nil ? 1 : 0.5)
         .onHover { hovering = $0 }
         .help("\(location)\n\(details)")
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(machine.map { "\($0), \(title)" } ?? title)
         .accessibilityValue(details)
         .accessibilityHint(location)
-        .accessibilityAddTraits(isCurrent ? .isSelected : [])
+        .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { tabsModel.open(checkout) }
         .contextMenu {
             if checkout.host == nil {
                 Button("Reveal in Finder") {
@@ -352,7 +428,7 @@ struct RepositoryCheckoutBarItem: View {
 
             Button("Remove Worktree…") {
                 guard GitPrompt.confirmRemoveWorktree(worktree) else { return }
-                tabsModel.removeWorktree(worktree)
+                Task { await tabsModel.removeWorktree(worktree) }
             }
             .disabled(!isRemovable)
 

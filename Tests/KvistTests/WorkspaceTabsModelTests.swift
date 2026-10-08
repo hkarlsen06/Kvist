@@ -520,7 +520,7 @@ final class WorkspaceTabsModelTests: XCTestCase {
         }
         XCTAssertNotNil(tabsModel.checkoutRegistry.checkout(id: linkedID))
 
-        tabsModel.removeWorktree(linked)
+        await tabsModel.removeWorktree(linked)
         let deadline = Date().addingTimeInterval(5)
         while tabsModel.tabs.count > 1, Date() < deadline {
             try await Task.sleep(for: .milliseconds(25))
@@ -629,8 +629,9 @@ final class WorkspaceTabsModelTests: XCTestCase {
         let unrelated = try repository(origin: nil)
         let clone = try repository(origin: "git@github.com:me/x.git")
         defer { [first, unrelated, clone].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let defaults = isolatedDefaults()
         let tabsModel = WorkspaceTabsModel(
-            defaults: isolatedDefaults(),
+            defaults: defaults,
             restoredRepositoryURLs: [first, unrelated]
         )
         let firstTab = tabsModel.tabs[0]
@@ -657,6 +658,19 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(
             tabsModel.checkouts(shownWith: firstTab).map(\.host),
             [nil, nil, "alpha", "zeta"]
+        )
+
+        // A dragged checkout lands at its index, and the order survives a
+        // relaunch.
+        tabsModel.moveCheckout("zeta:/srv/x", toIndex: 2, shownWith: firstTab)
+        tabsModel.moveCheckout("alpha:/srv/x", toIndex: 0, shownWith: firstTab)
+        XCTAssertEqual(
+            tabsModel.checkouts(shownWith: firstTab).map(\.host),
+            ["alpha", nil, nil, "zeta"]
+        )
+        XCTAssertEqual(
+            WorkspaceTabsModel(defaults: defaults, restoreSavedTabs: false).checkoutOrder,
+            tabsModel.checkoutOrder
         )
 
         // A tab connecting to its SSH checkout is named, loading, and in
