@@ -231,6 +231,8 @@ final class WorkspaceTabsModel: ObservableObject {
         didSet { activeTabDidChange(from: oldValue) }
     }
     @Published private(set) var recentRepositoryPaths: [String] = []
+    /// Every checkout of every repository, across this Mac and SSH hosts.
+    let checkoutRegistry: CheckoutRegistry
 
     private let defaults: UserDefaults
     private let persistenceEnabled: Bool
@@ -261,6 +263,10 @@ final class WorkspaceTabsModel: ObservableObject {
     ) {
         self.defaults = defaults
         self.persistenceEnabled = persistenceEnabled
+        checkoutRegistry = CheckoutRegistry(
+            defaults: defaults,
+            persistenceEnabled: persistenceEnabled
+        )
         self.monitoringActivationDelayMilliseconds = max(
             0,
             monitoringActivationDelayMilliseconds

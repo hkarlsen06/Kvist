@@ -4400,3 +4400,84 @@ enum GraphLayout {
         return nil
     }
 }
+
+extension GitClient {
+    private static let originArguments = ["config", "--get", "remote.origin.url"]
+
+    /// The status and origin of several checkouts on one machine, keyed by
+    /// path. Over SSH this is one round trip, and an unreachable host fails
+    /// every path with the same error.
+    static func checkoutStatuses(
+        host: String?,
+        paths: [String]
+    ) -> [String: Result<CheckoutStatus, Error>] {
+        let parser = GitClient(repositoryURL: URL(fileURLWithPath: "/"))
+        func status(statusOutput: String, originOutput: String) -> CheckoutStatus {
+            let parsed = parser.parseRepositoryStatus(statusOutput)
+            let changedPaths = Set(
+                (parsed.workingTree.staged + parsed.workingTree.unstaged).map(\.path)
+            )
+            return CheckoutStatus(
+                branch: parsed.branch,
+                ahead: parsed.ahead,
+                behind: parsed.behind,
+                hasUpstream: parsed.hasUpstream,
+                changeCount: changedPaths.count,
+                origin: Checkout.normalizedOrigin(originOutput),
+                updatedAt: Date()
+            )
+        }
+
+        guard let host else {
+            var results: [String: Result<CheckoutStatus, Error>] = [:]
+            for path in paths {
+                let client = GitClient(repositoryURL: URL(fileURLWithPath: path, isDirectory: true))
+                results[path] = Result {
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        throw GitCommandError(command: "git status", output: "The folder is missing.")
+                    }
+                    return status(
+                        statusOutput: try client.run(repositoryStatusArguments),
+                        originOutput: try client.run(originArguments, allowedExitCodes: [0, 1])
+                    )
+                }
+            }
+            return results
+        }
+
+        let commands = paths.flatMap { path in
+            [
+                remoteCommand(path: path, gitArguments: configuredGitArguments(repositoryStatusArguments)),
+                remoteCommand(path: path, gitArguments: originArguments)
+            ]
+        }
+        let remoteResults: [RemoteCommandResult]
+        do {
+            remoteResults = try parseRemoteCommandResults(
+                runSSH(host: host, command: framedRemoteCommands(commands)),
+                expectedCount: commands.count
+            )
+        } catch {
+            return Dictionary(uniqueKeysWithValues: paths.map { ($0, .failure(error)) })
+        }
+        var results: [String: Result<CheckoutStatus, Error>] = [:]
+        for (index, path) in paths.enumerated() {
+            let statusResult = remoteResults[index * 2]
+            let originResult = remoteResults[index * 2 + 1]
+            guard statusResult.exitCode == 0 else {
+                results[path] = .failure(GitCommandError(
+                    command: "git status",
+                    output: String(decoding: statusResult.output, as: UTF8.self)
+                ))
+                continue
+            }
+            results[path] = .success(status(
+                statusOutput: String(decoding: statusResult.output, as: UTF8.self),
+                originOutput: originResult.exitCode == 0
+                    ? String(decoding: originResult.output, as: UTF8.self)
+                    : ""
+            ))
+        }
+        return results
+    }
+}

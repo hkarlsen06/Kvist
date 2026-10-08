@@ -68,6 +68,7 @@ struct KvistApp: App {
             }
                 .id(themePreferences.appearanceStamp)
                 .environmentObject(tabsModel)
+                .environmentObject(tabsModel.checkoutRegistry)
                 .environmentObject(themePreferences)
                 .onAppear {
                     appDelegate.tabsModel = tabsModel
