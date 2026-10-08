@@ -497,6 +497,11 @@ final class WorkspaceTabsModel: ObservableObject {
         }
     }
 
+    /// Selects the tab that shows the checkout, or opens it in a new tab.
+    func open(_ checkout: Checkout) {
+        switchToWorktree(checkout.worktree)
+    }
+
     /// Removes a worktree of the active repository and closes its tabs,
     /// moving to another worktree first if the active tab shows it.
     func removeWorktree(_ worktree: GitWorktree) {
