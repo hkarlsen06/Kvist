@@ -110,6 +110,15 @@ struct RepositoryWorktreeBar: View {
                     try? await Task.sleep(for: .seconds(60))
                 }
             }
+            // Checkouts on the same machine share remote-tracking branches,
+            // so a fetch, pull, or push here changes their ahead and behind
+            // counts too. Reading this checkout as well keeps its counts
+            // current for when another tab is in front.
+            .onChange(of: model.snapshotRevision) {
+                guard let host = checkouts.first(where: { tab.shows($0.worktree) }).map(\.host) else { return }
+                let sameMachine = checkouts.filter { $0.host == host }
+                Task { await registry.refresh(sameMachine) }
+            }
         }
     }
 

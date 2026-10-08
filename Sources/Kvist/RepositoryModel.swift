@@ -142,6 +142,9 @@ final class RepositoryModel: ObservableObject {
     @Published private(set) var expandedFileDirectories: Set<String> = []
     @Published private(set) var selectedRepositoryFilePath: String?
     @Published private(set) var repositoryFilesRevision = 0
+    /// Counts full refreshes, which run when references or HEAD may have
+    /// moved, such as after a fetch, commit, or checkout.
+    @Published private(set) var snapshotRevision = 0
     @Published private(set) var isFileSearchPresented = false
     @Published private(set) var isFileSearchResultsPresented = false
     @Published var repositorySearchQuery = "" {
@@ -4015,6 +4018,7 @@ final class RepositoryModel: ObservableObject {
         _ snapshot: RepositorySnapshot,
         includeWorkingTree: Bool = true
     ) {
+        snapshotRevision &+= 1
         if branch != snapshot.branch { branch = snapshot.branch }
         if includeWorkingTree {
             applyWorkingTree(
