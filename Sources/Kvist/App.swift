@@ -332,6 +332,7 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
     // Option-Tab / Option-Shift-Tab cycle repository tabs. Menu items can
     // only carry one key equivalent (⌘⇧] / ⌘⇧[), so the alternates are
     // handled with an event monitor instead of duplicate menu entries.
+    // ⌃1 through ⌃9 pick a checkout in the same way.
     // ⌘W closes the repository tab here too: the monitor runs before menu
     // dispatch, and the system Close item keeps ⌘W in the menu itself.
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -356,6 +357,13 @@ private final class KvistAppDelegate: NSObject, NSApplicationDelegate {
             // ⌘Z or Dvorak's ⌘, never closes a tab.
             if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "w" {
                 tabsModel.closeActiveTabOrWindow()
+                return nil
+            }
+            // ⌃1 through ⌃9 open the Nth checkout in the checkout bar.
+            if flags == .control,
+               let digit = event.charactersIgnoringModifiers.flatMap({ Int($0) }),
+               (1...9).contains(digit) {
+                tabsModel.openCheckout(at: digit)
                 return nil
             }
             guard event.keyCode == 48 else { return event }

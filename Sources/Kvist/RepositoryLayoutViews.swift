@@ -1,14 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// The active repository's worktrees, under the tab row. A worktree is
-/// another folder with its own checked-out branch. Each one opens in its own
-/// tab so it keeps its own drafts and panels, and those tabs share the
-/// repository's entry in the tab row.
+/// The checkouts of the active repository, under the tab row. A checkout is
+/// a folder with the repository: a linked worktree, or a clone on another
+/// machine. Each one opens in its own tab so it keeps its own drafts and
+/// panels, and those tabs share the repository's entry in the tab row.
 struct RepositoryWorktreeBar: View {
     @ObservedObject private var tab: RepositoryTab
     @ObservedObject private var model: RepositoryModel
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    @EnvironmentObject private var registry: CheckoutRegistry
 
     init(tab: RepositoryTab) {
         _tab = ObservedObject(wrappedValue: tab)
@@ -17,6 +18,11 @@ struct RepositoryWorktreeBar: View {
 
     var body: some View {
         if tab.repositoryURL != nil, !model.isPlainFolder {
+            let checkouts = tabsModel.checkouts(shownWith: tab)
+            let group = tabsModel.group(of: tab)
+            let listed = group.flatMap(\.worktrees)
+            let mainIDs = Set(group.compactMap(\.worktrees.first).map { Checkout(worktree: $0).id })
+            let showsMachines = Set(checkouts.map(\.host)).count > 1
             HStack(spacing: 0) {
                 ScrollView(.horizontal) {
                     HStack(spacing: 2) {
@@ -24,15 +30,23 @@ struct RepositoryWorktreeBar: View {
                             .frame(width: 20, height: 22)
                             .accessibilityHidden(true)
 
-                        ForEach(worktrees) { worktree in
-                            // Git lists the main worktree first, and it
-                            // cannot be removed.
-                            let isMain = worktree.id == worktrees.first?.id
-                            RepositoryWorktreeBarItem(
-                                worktree: worktree,
-                                isMain: isMain,
-                                isCurrent: tab.shows(worktree),
-                                isRemovable: !isMain && !isBusy
+                        ForEach(checkouts) { checkout in
+                            let isCurrent = tab.shows(checkout.worktree)
+                            let state = state(of: checkout, isCurrent: isCurrent)
+                            RepositoryCheckoutBarItem(
+                                checkout: checkout,
+                                worktree: model.worktrees.first { checkout.isSame(as: $0) } ?? checkout.worktree,
+                                title: state?.branch
+                                    ?? listed.first { checkout.isSame(as: $0) }?.branch
+                                    ?? checkout.name,
+                                machine: showsMachines ? checkout.machineName : nil,
+                                state: state,
+                                failure: registry.failures[checkout.id],
+                                isMain: mainIDs.contains(checkout.id),
+                                isCurrent: isCurrent,
+                                isRemovable: isRemovable(checkout),
+                                canForget: !tabsModel.isOpen(checkout)
+                                    && !listed.contains { checkout.isSame(as: $0) }
                             )
                         }
                     }
@@ -65,21 +79,35 @@ struct RepositoryWorktreeBar: View {
                     .frame(height: 1)
             }
             .accessibilityElement(children: .contain)
-            .accessibilityLabel("Worktrees")
+            .accessibilityLabel("Checkouts")
+            // Restarts when the tab or the list changes, and stops when the
+            // bar leaves the screen.
+            .task(id: "\(tab.id)\(checkouts.map(\.id))") {
+                while !Task.isCancelled {
+                    await registry.refresh(checkouts, maximumAge: 30)
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
         }
     }
 
-    /// A repository without linked worktrees lists only its own folder.
-    private var worktrees: [GitWorktree] {
-        if !tab.worktrees.isEmpty { return tab.worktrees }
-        guard let path = model.sshRepository?.path ?? model.repositoryURL?.path else {
-            return []
+    /// The current checkout reads from its live model, which is never stale.
+    /// Others use the registry's last status, then their open tab's model.
+    private func state(of checkout: Checkout, isCurrent: Bool) -> CheckoutBarState? {
+        if isCurrent { return CheckoutBarState(model: model) }
+        if let status = registry.statuses[checkout.id] { return CheckoutBarState(status: status) }
+        if let other = tabsModel.tabs.first(where: { $0.shows(checkout.worktree) })?.loadedModel,
+           other.repositoryURL != nil {
+            return CheckoutBarState(model: other)
         }
-        return [GitWorktree(
-            path: path,
-            branch: model.branch == "detached HEAD" ? nil : model.branch,
-            sshHost: model.sshRepository?.host
-        )]
+        return nil
+    }
+
+    /// Only a linked worktree of the active repository can be removed. Git
+    /// lists the main worktree first, and it cannot be removed.
+    private func isRemovable(_ checkout: Checkout) -> Bool {
+        !isBusy
+            && model.worktrees.dropFirst().contains { checkout.isSame(as: $0) }
     }
 
     private var isBusy: Bool {
@@ -163,40 +191,124 @@ struct HorizontalScrollEdgeBlur: ViewModifier {
     }
 }
 
-struct RepositoryWorktreeBarItem: View {
+/// What the bar shows about one checkout, from its open model or the last
+/// status the registry read.
+struct CheckoutBarState {
+    var branch: String?
+    var ahead = 0
+    var behind = 0
+    var changes = 0
+
+    init(branch: String?, ahead: Int, behind: Int, changes: Int) {
+        self.branch = branch == "detached HEAD" || branch?.isEmpty == true ? nil : branch
+        self.ahead = ahead
+        self.behind = behind
+        self.changes = changes
+    }
+
+    @MainActor
+    init(model: RepositoryModel) {
+        self.init(
+            branch: model.branch,
+            ahead: model.ahead,
+            behind: model.behind,
+            changes: Set(model.staged.map(\.path)).union(model.unstaged.map(\.path)).count
+        )
+    }
+
+    init(status: CheckoutStatus) {
+        self.init(
+            branch: status.branch,
+            ahead: status.ahead,
+            behind: status.behind,
+            changes: status.changeCount
+        )
+    }
+
+    var summary: String {
+        var parts = [changes == 0 ? "Clean" : "\(changes) changed \(changes == 1 ? "file" : "files")"]
+        if ahead > 0 { parts.append("\(ahead) ahead") }
+        if behind > 0 { parts.append("\(behind) behind") }
+        return parts.joined(separator: ", ")
+    }
+}
+
+struct RepositoryCheckoutBarItem: View {
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    @EnvironmentObject private var registry: CheckoutRegistry
+    let checkout: Checkout
+    /// The worktree as Git lists it, which removing needs.
     let worktree: GitWorktree
+    let title: String
+    /// Set when the bar lists more than one machine.
+    let machine: String?
+    let state: CheckoutBarState?
+    /// The last error reading this checkout, such as an unreachable host.
+    let failure: String?
     let isMain: Bool
     let isCurrent: Bool
     let isRemovable: Bool
+    /// No tab shows the checkout and no open repository lists it as a worktree.
+    let canForget: Bool
     @State private var hovering = false
 
-    /// Git checks a branch out in only one worktree, so the branch names it.
-    /// The folder is usually `<repo>-<branch>` and only adds width, so it
-    /// moves to the tooltip. A detached HEAD falls back to the folder.
-    private var title: String {
-        worktree.branch ?? worktree.name
+    private var location: String {
+        isMain ? "Main worktree at \(checkout.location)" : checkout.location
     }
 
-    private var location: String {
-        let path = worktree.sshHost.map { "\($0):\(worktree.path)" } ?? worktree.path
-        return isMain ? "Main worktree at \(path)" : path
+    private var details: String {
+        failure ?? state?.summary ?? "Status not read yet"
     }
 
     var body: some View {
         Button {
-            tabsModel.switchToWorktree(worktree)
+            tabsModel.open(checkout)
         } label: {
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                if let machine {
+                    if checkout.host != nil {
+                        SSHLogo()
+                            .frame(width: 12, height: 12)
+                            .accessibilityHidden(true)
+                    }
+                    Text(machine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AppTheme.muted)
+                        .lineLimit(1)
+                    Text("·")
+                        .foregroundStyle(AppTheme.muted)
+                }
+
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+
+                if let state, failure == nil {
+                    if state.changes > 0 {
+                        Circle()
+                            .fill(AppTheme.modified)
+                            .frame(width: 5, height: 5)
+                            .accessibilityHidden(true)
+                    }
+                    if state.ahead > 0 {
+                        Text("↑\(state.ahead)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                    if state.behind > 0 {
+                        Text("↓\(state.behind)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                }
+            }
             .padding(.horizontal, 8)
             .frame(height: 22)
             .background {
                 if isCurrent || hovering {
                     RoundedRectangle(cornerRadius: 5)
                         // Some themes derive raisedFill from the canvas, which
-                        // would hide the current worktree.
+                        // would hide the current checkout.
                         .fill(isCurrent ? AppTheme.selection : AppTheme.hover)
                 }
             }
@@ -204,21 +316,23 @@ struct RepositoryWorktreeBarItem: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(isCurrent ? AppTheme.primary : AppTheme.secondary)
+        .opacity(failure == nil ? 1 : 0.5)
         .onHover { hovering = $0 }
-        .help(location)
-        .accessibilityLabel(title)
+        .help("\(location)\n\(details)")
+        .accessibilityLabel(machine.map { "\($0), \(title)" } ?? title)
+        .accessibilityValue(details)
         .accessibilityHint(location)
         .accessibilityAddTraits(isCurrent ? .isSelected : [])
         .contextMenu {
-            if worktree.sshHost == nil {
+            if checkout.host == nil {
                 Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([worktree.url])
+                    NSWorkspace.shared.activateFileViewerSelecting([checkout.worktree.url])
                 }
             }
 
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(worktree.path, forType: .string)
+                NSPasteboard.general.setString(checkout.path, forType: .string)
             }
 
             Divider()
@@ -228,6 +342,12 @@ struct RepositoryWorktreeBarItem: View {
                 tabsModel.removeWorktree(worktree)
             }
             .disabled(!isRemovable)
+
+            if canForget {
+                Button("Remove from Kvist") {
+                    registry.remove(checkout.id)
+                }
+            }
         }
     }
 }

@@ -24,24 +24,44 @@ final class RepositoryTab: ObservableObject, Identifiable {
     /// and empty otherwise. Git lists the main worktree first. Saved with the
     /// workspace so restored tabs group before they load.
     @Published fileprivate(set) var worktrees: [GitWorktree] = []
+    /// The normalized `origin` URL, which names the repository across
+    /// machines. Saved with the workspace so restored tabs group before they
+    /// load, and nil until Kvist reads the remotes.
+    fileprivate(set) var origin: String?
 
     init(
         id: UUID = UUID(),
         repositoryURL: URL? = nil,
         restorationState: RepositoryRestorationState? = nil,
-        worktrees: [GitWorktree] = []
+        worktrees: [GitWorktree] = [],
+        origin: String? = nil
     ) {
         self.id = id
         repositoryPath = repositoryURL?.standardizedFileURL.path
         pendingRestorationState = restorationState
         isRepositoryLoadPending = repositoryURL != nil
         self.worktrees = worktrees
+        self.origin = origin
     }
 
-    /// Tabs of one repository's worktrees share this ID and one entry in
-    /// the top row.
-    var worktreeGroupID: String? {
-        worktrees.first.map { "\($0.sshHost ?? ""):\($0.path)" }
+    /// Tabs that show checkouts of one repository share this ID and one
+    /// entry in the top row. Clones with the same origin group across
+    /// machines. Without an origin, a repository's linked worktrees group
+    /// through the main worktree's location.
+    var groupID: String? {
+        origin ?? worktrees.first.map { "\($0.sshHost ?? ""):\($0.path)" }
+    }
+
+    /// The folder this tab shows, on this Mac or on an SSH host. An SSH
+    /// tab's own path is a local mirror, which this never returns.
+    var checkout: Checkout? {
+        guard let repositoryPath else { return nil }
+        let remote = storedModel?.sshRepository
+            ?? SSHRepository.mirrored(at: URL(fileURLWithPath: repositoryPath, isDirectory: true))
+        if let remote {
+            return Checkout(host: remote.host, path: remote.path, origin: origin)
+        }
+        return Checkout(host: nil, path: repositoryPath, origin: origin)
     }
 
     var model: RepositoryModel {
@@ -217,6 +237,9 @@ private struct RestoredRepositoryTab: Codable {
     let repositoryPath: String?
     let state: RepositoryRestorationState
     let worktrees: [GitWorktree]?
+    /// Added after the first release of this format, so older saved
+    /// workspaces decode without it.
+    let origin: String?
 }
 
 private struct RestoredWorkspace: Codable {
@@ -247,7 +270,7 @@ final class WorkspaceTabsModel: ObservableObject {
     private var repositorySubscriptions: [UUID: [AnyCancellable]] = [:]
     /// The tab each worktree group showed last, so its top-row entry returns
     /// to that worktree.
-    private var lastActiveTabIDByWorktreeGroup: [String: UUID] = [:]
+    private var lastActiveTabIDByGroup: [String: UUID] = [:]
     private var activeModelSubscription: AnyCancellable?
     private var persistenceTask: Task<Void, Never>?
     private var monitoringActivationWorkItem: DispatchWorkItem?
@@ -313,7 +336,8 @@ final class WorkspaceTabsModel: ObservableObject {
                 id: saved.id,
                 repositoryURL: URL(fileURLWithPath: standardizedPath, isDirectory: true),
                 restorationState: saved.state,
-                worktrees: saved.worktrees ?? []
+                worktrees: saved.worktrees ?? [],
+                origin: saved.origin
             )
         } ?? []
         let restoredTabs: [RepositoryTab]
@@ -356,8 +380,8 @@ final class WorkspaceTabsModel: ObservableObject {
     private func activeTabDidChange(from oldTabID: UUID) {
         monitoringActivationWorkItem?.cancel()
         if let oldTab = tabs.first(where: { $0.id == oldTabID }) {
-            if let group = oldTab.worktreeGroupID {
-                lastActiveTabIDByWorktreeGroup[group] = oldTab.id
+            if let group = oldTab.groupID {
+                lastActiveTabIDByGroup[group] = oldTab.id
             }
             oldTab.deactivate()
         }
@@ -454,20 +478,21 @@ final class WorkspaceTabsModel: ObservableObject {
     var topLevelTabs: [RepositoryTab] {
         var seenGroups = Set<String>()
         return tabs.compactMap { tab in
-            guard let group = tab.worktreeGroupID else { return tab }
+            guard let group = tab.groupID else { return tab }
             guard seenGroups.insert(group).inserted else { return nil }
             return representative(of: tab)
         }
     }
 
-    private func worktreeGroup(of tab: RepositoryTab) -> [RepositoryTab] {
-        guard let group = tab.worktreeGroupID else { return [tab] }
-        return tabs.filter { $0.worktreeGroupID == group }
+    /// The tabs that share the tab's top-row entry, in tab order.
+    func group(of tab: RepositoryTab) -> [RepositoryTab] {
+        guard let group = tab.groupID else { return [tab] }
+        return tabs.filter { $0.groupID == group }
     }
 
     private func representative(of tab: RepositoryTab) -> RepositoryTab {
-        let members = worktreeGroup(of: tab)
-        let lastActiveID = tab.worktreeGroupID.flatMap { lastActiveTabIDByWorktreeGroup[$0] }
+        let members = group(of: tab)
+        let lastActiveID = tab.groupID.flatMap { lastActiveTabIDByGroup[$0] }
         return members.first { $0.id == activeTabID }
             ?? members.first { $0.id == lastActiveID }
             ?? members.first
@@ -478,16 +503,38 @@ final class WorkspaceTabsModel: ObservableObject {
     /// after the active one so each worktree keeps its own drafts and panels.
     /// The new tab joins the active tab's group in the top row.
     func switchToWorktree(_ worktree: GitWorktree) {
+        openTab(for: worktree, origin: activeTab.origin, after: group(of: activeTab))
+    }
+
+    /// Selects the tab that shows the checkout, or opens it in a new tab
+    /// after the tabs of the same repository. A checkout of a repository
+    /// with no open tab goes to the end, unless it is a worktree of the
+    /// active repository.
+    func open(_ checkout: Checkout) {
+        let origin = checkout.origin ?? checkoutRegistry.checkout(id: checkout.id)?.origin
+        var anchor = origin.map { origin in tabs.filter { $0.origin == origin } } ?? []
+        if anchor.isEmpty, activeTab.worktrees.contains(where: checkout.isSame(as:)) {
+            anchor = group(of: activeTab)
+        }
+        openTab(for: checkout.worktree, origin: origin, after: anchor)
+    }
+
+    private func openTab(for worktree: GitWorktree, origin: String?, after anchor: [RepositoryTab]) {
         if let existingTab = tabs.first(where: { $0.shows(worktree) }) {
             select(existingTab.id)
             return
         }
+        // Another machine's tab never takes this tab's worktree list, whose
+        // paths mean nothing there.
+        let sharesWorktrees = activeTab.worktrees.contains {
+            $0.sshHost == worktree.sshHost && $0.path == worktree.path
+        }
         let tab = RepositoryTab(
             repositoryURL: worktree.sshHost == nil ? worktree.url : nil,
-            worktrees: activeTab.worktrees.contains(worktree) ? activeTab.worktrees : []
+            worktrees: sharesWorktrees ? activeTab.worktrees : [],
+            origin: origin
         )
-        let group = worktreeGroup(of: activeTab)
-        let index = tabs.lastIndex { tab in group.contains { $0 === tab } } ?? tabs.count - 1
+        let index = tabs.lastIndex { tab in anchor.contains { $0 === tab } } ?? tabs.count - 1
         tabs.insert(tab, at: index + 1)
         observeRepository(tab)
         activeTabID = tab.id
@@ -497,9 +544,53 @@ final class WorkspaceTabsModel: ObservableObject {
         }
     }
 
-    /// Selects the tab that shows the checkout, or opens it in a new tab.
-    func open(_ checkout: Checkout) {
-        switchToWorktree(checkout.worktree)
+    /// The checkouts to list under the tab row for the tab's repository, this
+    /// Mac first, then SSH hosts by name. Within a machine the main worktree
+    /// comes first. The list joins the registry's clones of the repository
+    /// with the worktrees that open tabs know about.
+    func checkouts(shownWith tab: RepositoryTab) -> [Checkout] {
+        let members = group(of: tab)
+        var mainIDs = Set<Checkout.ID>()
+        var found: [Checkout] = []
+        if let own = tab.checkout {
+            found += checkoutRegistry.checkouts(sameRepositoryAs: own)
+        }
+        for member in members {
+            if let main = member.worktrees.first {
+                mainIDs.insert(Checkout(worktree: main).id)
+            }
+            found += member.worktrees.map { Checkout(worktree: $0, origin: member.origin) }
+            found += member.checkout.map { [$0] } ?? []
+        }
+        var seen = Set<Checkout.ID>()
+        let unique = found.filter { seen.insert($0.id).inserted }
+        return unique.enumerated().sorted { first, second in
+            func key(_ item: (offset: Int, element: Checkout)) -> (Int, String, Int, Int) {
+                (
+                    item.element.host == nil ? 0 : 1,
+                    item.element.host ?? "",
+                    mainIDs.contains(item.element.id) ? 0 : 1,
+                    item.offset
+                )
+            }
+            return key(first) < key(second)
+        }.map(\.element)
+    }
+
+    /// Opens the Nth checkout in the active tab's checkout bar, counting from 1.
+    func openCheckout(at position: Int) {
+        let tab = activeTab
+        guard let model = tab.loadedModel,
+              model.repositoryURL != nil,
+              !model.isPlainFolder else { return }
+        let checkouts = checkouts(shownWith: tab)
+        guard checkouts.indices.contains(position - 1) else { return }
+        open(checkouts[position - 1])
+    }
+
+    /// Whether a tab shows the checkout.
+    func isOpen(_ checkout: Checkout) -> Bool {
+        tabs.contains { $0.shows(checkout.worktree) }
     }
 
     /// Removes a worktree of the active repository and closes its tabs,
@@ -551,7 +642,7 @@ final class WorkspaceTabsModel: ObservableObject {
         let destination = min(max(targetIndex, 0), entries.count - 1)
         guard destination != index else { return }
         entries.insert(entries.remove(at: index), at: destination)
-        tabs = entries.flatMap(worktreeGroup(of:))
+        tabs = entries.flatMap(group(of:))
         persistTabs()
     }
 
@@ -559,7 +650,7 @@ final class WorkspaceTabsModel: ObservableObject {
     /// worktrees, since they share one entry in the top row.
     func close(_ tabID: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
-        let closedTabs = worktreeGroup(of: tab)
+        let closedTabs = group(of: tab)
         guard closedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
         closeTabs(closedTabs)
     }
@@ -588,7 +679,7 @@ final class WorkspaceTabsModel: ObservableObject {
 
     func closeOthers(_ tabID: UUID) {
         guard let keptTab = tabs.first(where: { $0.id == tabID }) else { return }
-        let keptTabs = worktreeGroup(of: keptTab)
+        let keptTabs = group(of: keptTab)
         let closedTabs = tabs.filter { tab in !keptTabs.contains { $0 === tab } }
         guard closedTabs.allSatisfy({ $0.confirmDiscardChanges() }) else { return }
         for tab in closedTabs {
@@ -727,8 +818,72 @@ final class WorkspaceTabsModel: ObservableObject {
                     self.objectWillChange.send()
                     tab.worktrees = grouped
                     self.persistTabs()
-                }
+                },
+            // Registers the tab's checkouts and reads its origin. The
+            // publishers fire before the model stores a value, and a load
+            // sets the URL before the SSH location and remotes, so wait for
+            // the turn to end and read the settled model.
+            Publishers.MergeMany(
+                model.$repositoryURL.map { _ in () }.eraseToAnyPublisher(),
+                model.$sshRepository.map { _ in () }.eraseToAnyPublisher(),
+                model.$remotes.map { _ in () }.eraseToAnyPublisher(),
+                model.$worktrees.map { _ in () }.eraseToAnyPublisher()
+            )
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak tab, weak model] in
+                guard let self, let tab, let model else { return }
+                self.registerCheckouts(of: model, for: tab)
+            }
         ]
+    }
+
+    /// The `origin` remote's identity, or the first remote's when the
+    /// repository has no `origin`.
+    private static func origin(of remotes: [GitRemote]) -> String? {
+        let remote = remotes.first { $0.name == "origin" } ?? remotes.first
+        return remote.flatMap { Checkout.normalizedOrigin($0.fetchURL) }
+    }
+
+    private func registerCheckouts(of model: RepositoryModel, for tab: RepositoryTab) {
+        guard model.repositoryURL != nil, !model.isPlainFolder else { return }
+        let origin = Self.origin(of: model.remotes)
+        // Git lists the main worktree first, so register in that order.
+        let listed = model.worktrees.map { Checkout(worktree: $0, origin: origin) }
+        let own: Checkout?
+        if let remote = model.sshRepository {
+            own = Checkout(host: remote.host, path: remote.path, origin: origin)
+        } else {
+            own = model.repositoryURL.map {
+                Checkout(host: nil, path: $0.standardizedFileURL.path, origin: origin)
+            }
+        }
+        (listed + [own].compactMap { $0 }).forEach(checkoutRegistry.register)
+        guard tab.origin != origin else { return }
+        // The top row is drawn from this object, not the tab.
+        objectWillChange.send()
+        tab.origin = origin
+        gatherGroup(of: tab)
+        persistTabs()
+    }
+
+    /// Moves the tab next to the other tabs of its group, if it is not
+    /// already, as when a freshly opened tab learns its origin.
+    private func gatherGroup(of tab: RepositoryTab) {
+        let members = group(of: tab)
+        guard members.count > 1 else { return }
+        let indices = members.compactMap { member in tabs.firstIndex { $0 === member } }
+        guard let first = indices.min(), let last = indices.max(),
+              last - first + 1 != members.count else { return }
+        // Keep the others where they are. The tab lands on the side it was
+        // already on, so it moves no further than it needs to.
+        let wasBefore = tabs.firstIndex { $0 === tab } == first
+        var reordered = tabs.filter { $0 !== tab }
+        let otherIndices = reordered.indices.filter { index in
+            members.contains { $0 === reordered[index] }
+        }
+        guard let firstOther = otherIndices.first, let lastOther = otherIndices.last else { return }
+        reordered.insert(tab, at: wasBefore ? firstOther : lastOther + 1)
+        tabs = reordered
     }
 
     private func persistTabs() {
@@ -771,7 +926,8 @@ final class WorkspaceTabsModel: ObservableObject {
                 id: $0.id,
                 repositoryPath: $0.repositoryPath,
                 state: $0.restorationState,
-                worktrees: $0.worktrees
+                worktrees: $0.worktrees,
+                origin: $0.origin
             )
         }
         let workspace = RestoredWorkspace(
@@ -781,5 +937,21 @@ final class WorkspaceTabsModel: ObservableObject {
         if let data = try? JSONEncoder().encode(workspace) {
             defaults.set(data, forKey: restoredWorkspaceKey)
         }
+    }
+}
+
+extension Checkout {
+    /// A local worktree's path is standardized, so `/private/var/x` from
+    /// `git worktree list` and `/var/x` from a tab name the same checkout.
+    init(worktree: GitWorktree, origin: String? = nil) {
+        self.init(
+            host: worktree.sshHost,
+            path: worktree.sshHost == nil ? worktree.url.standardizedFileURL.path : worktree.path,
+            origin: origin
+        )
+    }
+
+    func isSame(as worktree: GitWorktree) -> Bool {
+        id == Checkout(worktree: worktree).id
     }
 }

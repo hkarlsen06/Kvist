@@ -578,6 +578,80 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.tabs.map(\.id), [otherTabID])
     }
 
+    func testClonesOfOneOriginShareAnEntryAndRestoreGroupedBeforeLoading() async throws {
+        let first = try repository(origin: "git@github.com:me/x.git")
+        let unrelated = try repository(origin: nil)
+        let second = try repository(origin: "https://github.com/Me/x")
+        defer { [first, unrelated, second].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let defaults = isolatedDefaults()
+        let tabsModel = WorkspaceTabsModel(
+            defaults: defaults,
+            restoredRepositoryURLs: [first, unrelated, second]
+        )
+        let tabs = tabsModel.tabs
+        XCTAssertEqual(tabsModel.topLevelTabs.count, 3)
+
+        tabsModel.select(tabs[2].id)
+        await waitForOrigin("github.com/me/x", in: tabs[2])
+        tabsModel.select(tabs[0].id)
+        await waitForOrigin("github.com/me/x", in: tabs[0])
+
+        // The second clone moves next to the first once its origin is known.
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [tabs[1].id, tabs[0].id, tabs[2].id])
+        XCTAssertEqual(tabsModel.topLevelTabs.count, 2)
+        XCTAssertEqual(
+            tabsModel.checkoutRegistry.checkouts(sameRepositoryAs: try XCTUnwrap(tabs[0].checkout)).count,
+            2
+        )
+
+        tabsModel.prepareForTermination()
+        let restored = WorkspaceTabsModel(
+            defaults: defaults,
+            automaticallyActivatesInitialTab: false
+        )
+        XCTAssertEqual(restored.tabs.map(\.id), tabsModel.tabs.map(\.id))
+        XCTAssertEqual(restored.topLevelTabs.count, 2)
+
+        tabsModel.close(tabs[0].id)
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [tabs[1].id])
+    }
+
+    func testOpeningACheckoutSelectsItsTabOrJoinsTheTabsOfTheSameOrigin() async throws {
+        let first = try repository(origin: "git@github.com:me/x.git")
+        let unrelated = try repository(origin: nil)
+        let clone = try repository(origin: "git@github.com:me/x.git")
+        defer { [first, unrelated, clone].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [first, unrelated]
+        )
+        let firstTab = tabsModel.tabs[0]
+        await waitForOrigin("github.com/me/x", in: firstTab)
+
+        tabsModel.select(tabsModel.tabs[1].id)
+        tabsModel.open(Checkout(host: nil, path: first.path))
+        XCTAssertEqual(tabsModel.activeTabID, firstTab.id)
+        XCTAssertEqual(tabsModel.tabs.count, 2)
+
+        // The registry supplies the origin of a checkout it already knows.
+        tabsModel.checkoutRegistry.register(
+            Checkout(host: nil, path: clone.standardizedFileURL.path, origin: "github.com/me/x")
+        )
+        tabsModel.checkoutRegistry.register(Checkout(host: "zeta", path: "/srv/x", origin: "github.com/me/x"))
+        tabsModel.checkoutRegistry.register(Checkout(host: "alpha", path: "/srv/x", origin: "github.com/me/x"))
+        tabsModel.open(Checkout(host: nil, path: clone.standardizedFileURL.path))
+        XCTAssertEqual(tabsModel.tabs.count, 3)
+        XCTAssertEqual(tabsModel.tabs[1].repositoryURL?.standardizedFileURL.path, clone.standardizedFileURL.path)
+        XCTAssertEqual(tabsModel.activeTabID, tabsModel.tabs[1].id)
+        XCTAssertEqual(tabsModel.topLevelTabs.count, 2)
+
+        // This Mac first, then hosts by name.
+        XCTAssertEqual(
+            tabsModel.checkouts(shownWith: firstTab).map(\.host),
+            [nil, nil, "alpha", "zeta"]
+        )
+    }
+
     func testCloseOthersKeepsOnlyTheGivenTab() {
         let tabsModel = WorkspaceTabsModel(
             defaults: isolatedDefaults(),
@@ -637,6 +711,23 @@ final class WorkspaceTabsModelTests: XCTestCase {
                 != url.resolvingSymlinksInPath(),
               Date() < deadline {
             try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    /// A repository with one `origin` remote, or none.
+    private func repository(origin: String?) throws -> URL {
+        let url = try temporaryDirectory()
+        try GitClient.initializeRepository(at: url, createGitIgnore: false)
+        if let origin {
+            _ = try GitClient(repositoryURL: url).run(["remote", "add", "origin", origin])
+        }
+        return url
+    }
+
+    private func waitForOrigin(_ origin: String, in tab: RepositoryTab) async {
+        let deadline = Date().addingTimeInterval(5)
+        while tab.origin != origin, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
         }
     }
 
