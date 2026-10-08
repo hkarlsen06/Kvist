@@ -7,6 +7,23 @@ enum SSHConfigHosts {
     /// The names on `Host` lines, without wildcard or negated patterns
     /// (`*`, `?`, `!`), in file order and without repeats. `Match` blocks and
     /// `Include` files are not read.
+    /// One name per `Host` line, since the names on a line are aliases of
+    /// one machine. A name is preferred over an IP address.
+    static func machines(in config: String) -> [String] {
+        var result: [String] = []
+        for rawLine in config.split(whereSeparator: \.isNewline) {
+            let names = hosts(in: String(rawLine))
+            let isAddress: (String) -> Bool = { name in
+                name.contains(":") || name.allSatisfy { $0.isNumber || $0 == "." }
+            }
+            if let name = names.first(where: { !isAddress($0) }) ?? names.first,
+               !result.contains(name) {
+                result.append(name)
+            }
+        }
+        return result
+    }
+
     static func hosts(in config: String) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -28,9 +45,16 @@ enum SSHConfigHosts {
     }
 
     static func userConfigHosts() -> [String] {
+        hosts(in: userConfig)
+    }
+
+    static func userConfigMachines() -> [String] {
+        machines(in: userConfig)
+    }
+
+    private static var userConfig: String {
         let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".ssh/config")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return hosts(in: text)
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 }
 
@@ -77,6 +101,9 @@ struct ScanReview: Identifiable {
 struct HostScanState: Equatable {
     var isScanning = false
     var lastScan: Date?
+    /// The last scan that started, finished or not. Not saved, so a host
+    /// that failed is tried again after relaunch.
+    var lastAttempt: Date?
     var repositoryCount = 0
     /// The scan stopped at its limit, so more repositories may exist.
     var isTruncated = false
@@ -92,13 +119,53 @@ final class SSHHostsModel: ObservableObject {
     /// Keyed by host, with nil for this Mac.
     @Published private(set) var states: [String?: HostScanState] = [:]
     @Published var review: ScanReview?
+    /// Every repository the last scan of each machine found, whether or
+    /// not it was added to the registry. The welcome screen lists these.
+    @Published private(set) var discovered: [Checkout] = []
 
     private let defaults: UserDefaults
+    private let persistenceEnabled: Bool
     private let hostsKey = "sshHosts"
+    private let discoveredKey = "discoveredCheckouts"
+    /// Keyed by host, with "" for this Mac.
+    private let scanDatesKey = "machineScanDates"
 
-    init(defaults: UserDefaults = .standard) {
+    /// Until the user edits the list, the hosts are those named in
+    /// `~/.ssh/config`.
+    init(defaults: UserDefaults = .standard, persistenceEnabled: Bool = true) {
         self.defaults = defaults
-        hosts = defaults.stringArray(forKey: hostsKey) ?? []
+        self.persistenceEnabled = persistenceEnabled
+        if let stored = defaults.stringArray(forKey: hostsKey) {
+            hosts = stored
+        } else if persistenceEnabled {
+            hosts = SSHConfigHosts.userConfigMachines().filter {
+                (try? SSHRepository.validatedHost($0)) != nil
+            }
+        }
+        discovered = defaults.data(forKey: discoveredKey).flatMap {
+            try? JSONDecoder().decode([Checkout].self, from: $0)
+        } ?? []
+        let dates = defaults.dictionary(forKey: scanDatesKey) as? [String: Date] ?? [:]
+        for (key, date) in dates {
+            states[key.isEmpty ? nil : key] = HostScanState(lastScan: date)
+        }
+    }
+
+    /// Hosts whose last scan failed, with the error.
+    var unreachableHosts: [(host: String, error: String)] {
+        hosts.compactMap { host in states[host]?.error.map { (host, $0) } }
+    }
+
+    /// Scans, without a review, each machine not scanned within
+    /// `maximumAge`. Results only update `discovered`.
+    func discover(maximumAge: TimeInterval) async {
+        guard persistenceEnabled else { return }
+        let now = Date()
+        let due = ([nil] + hosts.map { Optional($0) }).filter { target in
+            let last = states[target].flatMap { $0.lastAttempt ?? $0.lastScan }
+            return last.map { now.timeIntervalSince($0) >= maximumAge } ?? true
+        }
+        _ = await runScans(due)
     }
 
     var isScanning: Bool { states.values.contains { $0.isScanning } }
@@ -117,18 +184,31 @@ final class SSHHostsModel: ObservableObject {
     func remove(_ host: String) {
         hosts.removeAll { $0 == host }
         states[host] = nil
+        discovered.removeAll { $0.host == host }
         defaults.set(hosts, forKey: hostsKey)
+        persistDiscoveries()
     }
 
     /// Scans the machines at once. Finished scans open a review with the
     /// repositories found, unless every scan failed or found nothing.
     func scan(_ targets: [String?], registry: CheckoutRegistry) async {
+        let all = await runScans(targets)
+        guard !all.isEmpty else { return }
+        review = ScanReview(
+            candidates: ScanCandidate.annotate(found: all, registered: registry.checkouts)
+        )
+    }
+
+    /// Scans the machines that are not already being scanned, all at once,
+    /// and returns what they found.
+    private func runScans(_ targets: [String?]) async -> [Checkout] {
         let targets = targets.filter { !(states[$0]?.isScanning ?? false) }
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else { return [] }
         for target in targets {
             states[target] = HostScanState(
                 isScanning: true,
                 lastScan: states[target]?.lastScan,
+                lastAttempt: Date(),
                 repositoryCount: states[target]?.repositoryCount ?? 0
             )
         }
@@ -152,22 +232,36 @@ final class SSHHostsModel: ObservableObject {
             case .success(let checkouts):
                 states[target] = HostScanState(
                     lastScan: Date(),
+                    lastAttempt: states[target]?.lastAttempt,
                     repositoryCount: checkouts.count,
                     isTruncated: checkouts.count >= Self.scanLimit
                 )
                 all += checkouts
+                discovered.removeAll { $0.host == target }
+                discovered += checkouts
             case .failure(let error):
                 states[target] = HostScanState(
                     lastScan: states[target]?.lastScan,
+                    lastAttempt: states[target]?.lastAttempt,
                     repositoryCount: states[target]?.repositoryCount ?? 0,
                     error: Self.message(for: error)
                 )
             }
         }
-        guard !all.isEmpty else { return }
-        review = ScanReview(
-            candidates: ScanCandidate.annotate(found: all, registered: registry.checkouts)
-        )
+        persistDiscoveries()
+        return all
+    }
+
+    private func persistDiscoveries() {
+        guard persistenceEnabled else { return }
+        if let data = try? JSONEncoder().encode(discovered) {
+            defaults.set(data, forKey: discoveredKey)
+        }
+        var dates: [String: Date] = [:]
+        for (target, state) in states {
+            if let lastScan = state.lastScan { dates[target ?? ""] = lastScan }
+        }
+        defaults.set(dates, forKey: scanDatesKey)
     }
 
     /// Lists the repositories under the home folder and reads their origins.

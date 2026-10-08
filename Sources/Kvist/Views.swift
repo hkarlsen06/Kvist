@@ -648,10 +648,8 @@ struct WelcomeView: View {
                 .help("Browse and edit files on a remote machine, with Git when the folder is a repository")
             }
 
-            if !recentRepositories.isEmpty {
-                RecentRepositoriesList(repositories: recentRepositories)
-                    .padding(.top, 34)
-            }
+            RepositoryPickerList()
+                .padding(.top, 34)
 
             Spacer(minLength: 20)
         }
@@ -702,10 +700,6 @@ struct WelcomeView: View {
         }
     }
 
-    private var recentRepositories: [URL] {
-        tabsModel.recentRepositoryURLs
-    }
-
     private func cloneRepository() {
         guard let remoteURL = GitPrompt.cloneRemoteURL(),
               let destinationURL = GitPrompt.cloneDestinationFolder() else { return }
@@ -719,102 +713,6 @@ struct WelcomeView: View {
         var isDirectory: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
         return isDirectory.boolValue ? url : url.deletingLastPathComponent()
-    }
-}
-
-struct RecentRepositoriesList: View {
-    let repositories: [URL]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("RECENT")
-                .font(AppType.panelTitle)
-                .tracking(0.8)
-                .foregroundStyle(AppTheme.muted)
-                .padding(.leading, 9)
-                .padding(.bottom, 4)
-                .accessibilityAddTraits(.isHeader)
-
-            ForEach(repositories.prefix(5), id: \.path) { url in
-                RecentRepositoryRow(url: url)
-            }
-        }
-        .frame(width: 300)
-    }
-}
-
-struct RecentRepositoryRow: View {
-    @EnvironmentObject private var model: RepositoryModel
-    @EnvironmentObject private var tabsModel: WorkspaceTabsModel
-    let url: URL
-    private let sshRepository: SSHRepository?
-    @State private var hovering = false
-
-    init(url: URL) {
-        self.url = url
-        sshRepository = SSHRepository.mirrored(at: url)
-    }
-
-    var body: some View {
-        Button {
-            Task { await model.openRepository(url) }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: sshRepository == nil ? "folder" : "network")
-                    .font(.system(size: 12))
-                    .foregroundStyle(AppTheme.secondary)
-                    .frame(width: 16)
-
-                Text(url.lastPathComponent)
-                    .font(AppType.rowDetail)
-                    .foregroundStyle(AppTheme.primary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-
-                Text(abbreviatedParentPath)
-                    .font(.system(size: 11))
-                    .foregroundStyle(AppTheme.muted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 26)
-            .contentShape(Rectangle())
-            .background(
-                hovering ? AppTheme.hover : .clear,
-                in: RoundedRectangle(cornerRadius: 5)
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(sshRepository?.location() ?? url.path)
-        .disabled(
-            model.isBusy
-                || model.isGeneratingCommitMessage
-                || model.hasPendingChangeOperations
-        )
-        .contextMenu {
-            if sshRepository == nil {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                }
-            }
-
-            Button("Remove from Recents") {
-                tabsModel.removeRecentRepository(path: url.path)
-            }
-        }
-    }
-
-    private var abbreviatedParentPath: String {
-        if let sshRepository {
-            return "\(sshRepository.host):"
-                + (sshRepository.path as NSString).deletingLastPathComponent
-        }
-        return (url.deletingLastPathComponent().path as NSString)
-            .abbreviatingWithTildeInPath
     }
 }
 

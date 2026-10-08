@@ -80,4 +80,17 @@ final class SSHHostsTests: XCTestCase {
             .map { $0.replacingOccurrences(of: home.path, with: "") }
         XCTAssertEqual(paths, ["/code/app", "/code/linked"])
     }
+
+    func testMachinesTakeOneNamePerHostLine() {
+        let config = """
+        Host *
+          ServerAliveInterval 30
+        Host dev mdr
+          HostName 100.106.184.0
+        Host 100.109.207.90 one-s 85.190.118.114
+        Host one-m
+        Host one-m
+        """
+        XCTAssertEqual(SSHConfigHosts.machines(in: config), ["dev", "one-s", "one-m"])
+    }
 }

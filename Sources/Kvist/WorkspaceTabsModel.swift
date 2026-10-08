@@ -281,6 +281,8 @@ final class WorkspaceTabsModel: ObservableObject {
     @Published private(set) var recentRepositoryPaths: [String] = []
     /// Every checkout of every repository, across this Mac and SSH hosts.
     let checkoutRegistry: CheckoutRegistry
+    /// SSH hosts and the repositories scans found on every machine.
+    let hostsModel: SSHHostsModel
 
     private let defaults: UserDefaults
     private let persistenceEnabled: Bool
@@ -315,6 +317,7 @@ final class WorkspaceTabsModel: ObservableObject {
             defaults: defaults,
             persistenceEnabled: persistenceEnabled
         )
+        hostsModel = SSHHostsModel(defaults: defaults, persistenceEnabled: persistenceEnabled)
         self.monitoringActivationDelayMilliseconds = max(
             0,
             monitoringActivationDelayMilliseconds

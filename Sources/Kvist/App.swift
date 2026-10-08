@@ -70,6 +70,7 @@ struct KvistApp: App {
                 .id(themePreferences.appearanceStamp)
                 .environmentObject(tabsModel)
                 .environmentObject(tabsModel.checkoutRegistry)
+                .environmentObject(tabsModel.hostsModel)
                 .environmentObject(themePreferences)
                 .onAppear {
                     appDelegate.tabsModel = tabsModel
@@ -309,6 +310,7 @@ struct KvistApp: App {
                 .id(themePreferences.appearanceStamp)
                 .environmentObject(tabsModel)
                 .environmentObject(tabsModel.checkoutRegistry)
+                .environmentObject(tabsModel.hostsModel)
                 .preferredColorScheme(themePreferences.preferredColorScheme)
                 .tint(AppTheme.actionBlue)
                 .frame(minWidth: 640, minHeight: 360)
@@ -320,6 +322,7 @@ struct KvistApp: App {
                 PreferencesView()
                     .environmentObject(themePreferences)
                     .environmentObject(tabsModel.checkoutRegistry)
+                    .environmentObject(tabsModel.hostsModel)
             } else {
                 EmptyView()
             }

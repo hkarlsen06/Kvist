@@ -70,4 +70,42 @@ final class CheckoutTests: XCTestCase {
         XCTAssertThrowsError(try results["/missing/kvist"]?.get())
         XCTAssertThrowsError(try results[nested.path]?.get())
     }
+
+    func testPickerGroupsClonesAndPutsRecentFirst() {
+        let local = Checkout(host: nil, path: "/code/kvist", origin: "github.com/me/kvist")
+        let remote = Checkout(host: "devbox", path: "/srv/kvist", origin: "github.com/me/kvist")
+        let other = Checkout(host: "devbox", path: "/srv/alpha", origin: "github.com/me/alpha")
+        let loose = Checkout(host: nil, path: "/code/notes")
+
+        let list = PickerRepository.list(
+            recent: [Checkout(host: "devbox", path: "/srv/kvist")],
+            known: [local, remote, other, loose]
+        )
+
+        XCTAssertEqual(list.map(\.name), ["kvist", "alpha", "notes"])
+        XCTAssertEqual(list[0].checkouts.map(\.id), [local.id, remote.id])
+        // The recent checkout opens on a click, even though it is remote.
+        XCTAssertEqual(list[0].preferred.id, remote.id)
+        XCTAssertEqual(list[0].label(for: remote), "devbox")
+        XCTAssertEqual(PickerRepository.list(recent: [], known: [local, remote, other], query: "alp").map(\.name), ["alpha"])
+        XCTAssertEqual(PickerRepository.list(recent: [], known: [local, remote], query: "devbox").count, 1)
+    }
+
+    @MainActor
+    func testHostsModelKeepsDiscoveriesAcrossLaunches() {
+        let defaults = UserDefaults(suiteName: "CheckoutTests-\(UUID().uuidString)")!
+        defaults.set(["devbox"], forKey: "sshHosts")
+        let found = [Checkout(host: "devbox", path: "/srv/kvist", origin: "github.com/me/kvist")]
+        defaults.set(try? JSONEncoder().encode(found), forKey: "discoveredCheckouts")
+        defaults.set(["devbox": Date(), "": Date()], forKey: "machineScanDates")
+
+        let model = SSHHostsModel(defaults: defaults)
+        XCTAssertEqual(model.hosts, ["devbox"])
+        XCTAssertEqual(model.discovered, found)
+        XCTAssertNotNil(model.states["devbox"]?.lastScan)
+        XCTAssertNotNil(model.states[nil]?.lastScan)
+
+        model.remove("devbox")
+        XCTAssertTrue(SSHHostsModel(defaults: defaults).discovered.isEmpty)
+    }
 }

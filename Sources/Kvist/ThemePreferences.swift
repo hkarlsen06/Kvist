@@ -2045,7 +2045,7 @@ private struct HostsPreferencesPane: View {
     /// object re-renders the pane when the selected theme changes.
     @EnvironmentObject private var themes: ThemePreferences
     @EnvironmentObject private var registry: CheckoutRegistry
-    @StateObject private var model = SSHHostsModel()
+    @EnvironmentObject private var model: SSHHostsModel
     @State private var newHost = ""
     @State private var addError: String?
     @State private var configHosts: [String] = []
