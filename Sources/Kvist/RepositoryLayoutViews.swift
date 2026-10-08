@@ -266,11 +266,6 @@ struct RepositoryCheckoutBarItem: View {
         } label: {
             HStack(spacing: 5) {
                 if let machine {
-                    if checkout.host != nil {
-                        SSHLogo()
-                            .frame(width: 12, height: 12)
-                            .accessibilityHidden(true)
-                    }
                     Text(machine)
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.muted)

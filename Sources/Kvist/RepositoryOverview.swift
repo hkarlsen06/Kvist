@@ -401,20 +401,10 @@ private struct RepositoryOverviewRow: View {
     }
 
     private var machine: some View {
-        HStack(spacing: 6) {
-            if checkout.host != nil {
-                SSHLogo().scaledToFit().frame(width: 14, height: 14)
-            } else {
-                Image(systemName: "laptopcomputer")
-                    .font(.system(size: 12))
-                    .frame(width: 14, height: 14)
-                    .foregroundStyle(AppTheme.secondary)
-            }
-            Text(checkout.machineName)
-                .font(AppType.rowEmphasis)
-                .lineLimit(1)
-        }
-        .frame(width: 130, alignment: .leading)
+        Text(checkout.machineName)
+            .font(AppType.rowEmphasis)
+            .lineLimit(1)
+            .frame(width: 130, alignment: .leading)
     }
 
     @ViewBuilder
