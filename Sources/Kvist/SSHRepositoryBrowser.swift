@@ -53,16 +53,30 @@ enum SSHBrowserRemote {
     }
 
     /// Best-effort sweep for checkouts near the home folder so most users
-    /// never have to navigate at all. Hidden folders other than `.git` are
-    /// pruned, and the trailing `exit 0` keeps unreadable subfolders from
-    /// failing the whole sweep.
+    /// never have to navigate at all. Hidden folders other than `.git`,
+    /// `node_modules` and `~/Library` are pruned, and the trailing `exit 0`
+    /// keeps unreadable subfolders from failing the whole sweep.
     static var suggestionsCommand: String {
-        posixShellCommand("""
+        posixShellCommand(repositoryScanScript(limit: 40))
+    }
+
+    /// The same sweep as `suggestionsCommand` with a higher limit, for
+    /// registering every checkout on a host.
+    static func repositoryScanCommand(limit: Int) -> String {
+        posixShellCommand(repositoryScanScript(limit: limit))
+    }
+
+    /// Plain POSIX `sh`, so it also runs locally and on hosts whose `sh` is
+    /// dash or busybox.
+    static func repositoryScanScript(limit: Int) -> String {
+        """
         find -H "$HOME" -mindepth 1 -maxdepth 4 \
-        \\( -name '.?*' ! -name .git -prune \\) -o -name .git -prune -print \
-        2>/dev/null | head -n 40
+        \\( -name '.?*' ! -name .git -prune \\) -o \
+        \\( -name node_modules -o -path "$HOME/Library" \\) -prune -o \
+        -name .git -prune -print \
+        2>/dev/null | head -n \(max(1, limit))
         exit 0
-        """)
+        """
     }
 
     static func parseListing(

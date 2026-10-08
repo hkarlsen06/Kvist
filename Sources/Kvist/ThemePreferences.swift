@@ -1522,6 +1522,9 @@ struct PreferencesView: View {
                 .environmentObject(themes)
                 .tabItem { Label("Themes", systemImage: "paintpalette") }
 
+            HostsPreferencesPane()
+                .tabItem { Label("Hosts", systemImage: "server.rack") }
+
             LegalPreferencesPane()
                 .tabItem { Label("Privacy & Legal", systemImage: "hand.raised") }
         }
@@ -2033,6 +2036,138 @@ private struct GeneralPreferencesPane: View {
         }
         if codexModel == AICommitMessageProvider.codex.legacyDefaultModel {
             codexModel = ""
+        }
+    }
+}
+
+private struct HostsPreferencesPane: View {
+    /// Colors are read from the static `AppTheme`; observing the preferences
+    /// object re-renders the pane when the selected theme changes.
+    @EnvironmentObject private var themes: ThemePreferences
+    @EnvironmentObject private var registry: CheckoutRegistry
+    @StateObject private var model = SSHHostsModel()
+    @State private var newHost = ""
+    @State private var addError: String?
+    @State private var configHosts: [String] = []
+
+    private var suggestions: [String] {
+        configHosts.filter { !model.hosts.contains($0) && (try? SSHRepository.validatedHost($0)) != nil }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                PreferencesSection("Machines") {
+                    machineRow(name: "This Mac", host: nil, scanTitle: "Scan This Mac")
+                    ForEach(model.hosts, id: \.self) { host in
+                        PreferencesRowDivider()
+                        machineRow(name: host, host: host, scanTitle: "Scan")
+                    }
+                    PreferencesRowDivider()
+                    PreferencesControlRow(
+                        "Scan all machines",
+                        caption: "Looks for Git repositories up to four folders below the home folder. Nothing is added until you review the list."
+                    ) {
+                        Button("Scan All") {
+                            scan([nil] + model.hosts.map { Optional($0) })
+                        }
+                        .disabled(model.isScanning)
+                    }
+                }
+
+                PreferencesSection("Add an SSH host") {
+                    PreferencesRow {
+                        HStack {
+                            TextField("user@example.com or a name from ~/.ssh/config", text: $newHost)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(addHost)
+                            Button("Add", action: addHost)
+                                .disabled(newHost.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                    }
+                    if let addError {
+                        PreferencesRow { PreferencesCaption(text: addError, isWarning: true) }
+                    }
+                    if !suggestions.isEmpty {
+                        PreferencesRowDivider()
+                        PreferencesRow {
+                            VStack(alignment: .leading, spacing: 6) {
+                                PreferencesCaption(text: "From ~/.ssh/config")
+                                LazyVGrid(
+                                    columns: [GridItem(.adaptive(minimum: 110), alignment: .leading)],
+                                    alignment: .leading
+                                ) {
+                                    ForEach(suggestions, id: \.self) { host in
+                                        Button(host) {
+                                            newHost = host
+                                            addHost()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(20)
+            .foregroundStyle(AppTheme.primary)
+        }
+        .background(AppTheme.canvas)
+        .onAppear { configHosts = SSHConfigHosts.userConfigHosts() }
+        .sheet(item: $model.review) { review in
+            ScanReviewSheet(review: review, registry: registry) { model.review = nil }
+        }
+    }
+
+    private func machineRow(name: String, host: String?, scanTitle: String) -> some View {
+        let state = model.states[host] ?? HostScanState()
+        return PreferencesControlRow(
+            name,
+            caption: caption(for: state),
+            isWarning: state.error != nil
+        ) {
+            HStack(spacing: 8) {
+                if state.isScanning { ProgressView().controlSize(.small) }
+                Button(scanTitle) { scan([host]) }
+                    .disabled(state.isScanning)
+                if let host {
+                    Button {
+                        model.remove(host)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove \(host)")
+                    .disabled(state.isScanning)
+                }
+            }
+        }
+    }
+
+    private func caption(for state: HostScanState) -> String? {
+        if state.isScanning { return "Scanning..." }
+        if let error = state.error { return error }
+        guard let lastScan = state.lastScan else { return nil }
+        let count = state.repositoryCount
+        let found = count == 1 ? "1 repository" : "\(count) repositories"
+        let limit = state.isTruncated ? " (stopped at the \(SSHHostsModel.scanLimit) repository limit)" : ""
+        let age = RelativeDateTimeFormatter().localizedString(for: lastScan, relativeTo: Date())
+        return "\(found) found \(age)\(limit)"
+    }
+
+    private func scan(_ targets: [String?]) {
+        Task { await model.scan(targets, registry: registry) }
+    }
+
+    private func addHost() {
+        do {
+            try model.add(newHost)
+            newHost = ""
+            addError = nil
+        } catch {
+            addError = (error as? GitCommandError)?.output ?? error.localizedDescription
         }
     }
 }

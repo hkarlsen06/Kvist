@@ -300,6 +300,7 @@ struct KvistApp: App {
             if hasPresentedInitialFrame {
                 PreferencesView()
                     .environmentObject(themePreferences)
+                    .environmentObject(tabsModel.checkoutRegistry)
             } else {
                 EmptyView()
             }
