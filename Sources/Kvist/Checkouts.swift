@@ -58,9 +58,13 @@ struct Checkout: Codable, Hashable, Identifiable, Sendable {
         if path.hasSuffix(".git") { path.removeLast(4) }
         path = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !path.isEmpty else { return nil }
-        value = "\(host)/\(path)"
-        // GitHub and GitLab ignore case in owner and repository names.
-        return value.lowercased()
+        let lowercasedHost = host.lowercased()
+        // These services ignore case in owner and repository names. A
+        // generic server's paths are file paths, where case matters.
+        let ignoresCase = ["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"]
+            .contains(lowercasedHost)
+        value = "\(lowercasedHost)/\(ignoresCase ? path.lowercased() : path)"
+        return value
     }
 }
 

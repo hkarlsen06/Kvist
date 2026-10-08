@@ -655,6 +655,13 @@ final class WorkspaceTabsModel: ObservableObject {
         closeTabs(closedTabs)
     }
 
+    /// Closes only this tab, leaving the repository's other checkouts open.
+    func closeTab(_ tabID: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabID }),
+              tab.confirmDiscardChanges() else { return }
+        closeTabs([tab])
+    }
+
     private func closeTabs(_ closedTabs: [RepositoryTab]) {
         let closedIDs = Set(closedTabs.map(\.id))
         guard let index = tabs.firstIndex(where: { closedIDs.contains($0.id) }) else { return }

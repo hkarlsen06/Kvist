@@ -85,8 +85,8 @@ struct HostScanState: Equatable {
 
 @MainActor
 final class SSHHostsModel: ObservableObject {
-    static let scanLimit = 200
-    static let statusBatchSize = 50
+    nonisolated static let scanLimit = 200
+    nonisolated static let statusBatchSize = 50
 
     @Published private(set) var hosts: [String] = []
     /// Keyed by host, with nil for this Mac.

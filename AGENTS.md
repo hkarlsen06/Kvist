@@ -54,6 +54,10 @@ All app code is in `Sources/Kvist`. Several files are large, so search for the t
 | Working-tree versus HEAD preview toggle | `GitFilePreview.swift` |
 | Diff rendering | `DiffDocument.swift`, `DraftDiff.swift` |
 | SSH transport and remote browser | `SSHConnection.swift`, `SSHRepositoryBrowser.swift`, `SSHMirrorStore.swift` |
+| Checkouts across this Mac and SSH hosts, origin matching, batched status | `Checkouts.swift` (`Checkout`, `CheckoutRegistry`), `GitClient.checkoutStatuses` |
+| Checkout bar under the tab row, grouping tabs by origin | `RepositoryLayoutViews.swift` (`RepositoryWorktreeBar`), `WorkspaceTabsModel.swift` (`open(_:)`, `checkouts(shownWith:)`) |
+| Repositories overview window (⌘0), Fetch All and Pull All | `RepositoryOverview.swift` |
+| SSH host list, repository scan, Hosts settings pane | `SSHHosts.swift`, `ThemePreferences.swift` (`HostsPreferencesPane`) |
 | AI commit messages, both Codex and Claude | `CodexCommitMessageGenerator.swift`, settings in `AICommitMessagePreferences.swift` |
 | In-app updater | `AppUpdater.swift` |
 | Benchmark hooks inside the app | `*PerformanceInstrumentation.swift`; the harnesses are in `Sources/KvistBenchmark*` |

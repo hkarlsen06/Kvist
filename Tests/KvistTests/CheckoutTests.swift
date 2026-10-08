@@ -15,6 +15,14 @@ final class CheckoutTests: XCTestCase {
         }
     }
 
+    func testNormalizedOriginKeepsCaseOnGenericServers() {
+        XCTAssertEqual(Checkout.normalizedOrigin("git@Server:Team/X.git"), "server/Team/X")
+        XCTAssertNotEqual(
+            Checkout.normalizedOrigin("git@server:Team/X.git"),
+            Checkout.normalizedOrigin("git@server:team/x.git")
+        )
+    }
+
     func testNormalizedOriginRejectsLocalPaths() {
         XCTAssertNil(Checkout.normalizedOrigin("/srv/git/kvist.git"))
         XCTAssertNil(Checkout.normalizedOrigin("file:///srv/git/kvist.git"))
@@ -48,11 +56,18 @@ final class CheckoutTests: XCTestCase {
         _ = try client.run(["remote", "add", "origin", "git@github.com:me/kvist.git"])
         try "a".write(to: directory.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
 
-        let results = GitClient.checkoutStatuses(host: nil, paths: [directory.path, "/missing/kvist"])
+        let nested = directory.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+
+        let results = GitClient.checkoutStatuses(
+            host: nil,
+            paths: [directory.path, "/missing/kvist", nested.path]
+        )
         let status = try XCTUnwrap(try results[directory.path]?.get())
         XCTAssertEqual(status.branch, "main")
         XCTAssertEqual(status.changeCount, 1)
         XCTAssertEqual(status.origin, "github.com/me/kvist")
         XCTAssertThrowsError(try results["/missing/kvist"]?.get())
+        XCTAssertThrowsError(try results[nested.path]?.get())
     }
 }

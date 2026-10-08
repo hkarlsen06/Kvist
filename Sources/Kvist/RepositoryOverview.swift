@@ -129,7 +129,7 @@ final class RepositoryOverviewModel: ObservableObject {
         _ checkouts: [Checkout], registry: CheckoutRegistry, tabs: WorkspaceTabsModel
     ) async {
         await perform(checkouts, verb: "Fetched", registry: registry, tabs: tabs) { targets in
-            await self.runPerHost(targets, work: Self.fetchWork) { self.results[$0] = $1 }
+            await self.runPerHost(targets, work: { Self.fetchWork($0) }) { self.results[$0] = $1 }
         }
     }
 
@@ -137,28 +137,18 @@ final class RepositoryOverviewModel: ObservableObject {
         _ checkouts: [Checkout], registry: CheckoutRegistry, tabs: WorkspaceTabsModel
     ) async {
         await perform(checkouts, verb: "Pulled", registry: registry, tabs: tabs) { targets in
-            // Fetch first so "behind" reflects the remote, then decide from
-            // fresh statuses.
+            // Fetch first so "behind" reflects the remote. Each pull then
+            // reads its own status, so a branch switch or new changes since
+            // the fetch are caught.
             var fetchFailed: Set<Checkout.ID> = []
-            await self.runPerHost(targets, work: Self.fetchWork) { id, result in
+            await self.runPerHost(targets, work: { Self.fetchWork($0) }) { id, result in
                 if case .failed = result {
                     self.results[id] = result
                     fetchFailed.insert(id)
                 }
             }
             let fetched = targets.filter { !fetchFailed.contains($0.id) }
-            await registry.refresh(fetched, maximumAge: 0)
-            var toPull: [Checkout] = []
-            for checkout in fetched {
-                switch RepositoryOverviewLogic.pullDecision(
-                    status: registry.statuses[checkout.id],
-                    failure: registry.failures[checkout.id]
-                ) {
-                case .pull: toPull.append(checkout)
-                case .skip(let reason): self.results[checkout.id] = .skipped(reason)
-                }
-            }
-            await self.runPerHost(toPull, work: Self.pullWork) { self.results[$0] = $1 }
+            await self.runPerHost(fetched, work: { Self.pullWork($0) }) { self.results[$0] = $1 }
         }
     }
 
@@ -234,6 +224,15 @@ final class RepositoryOverviewModel: ObservableObject {
     }
 
     private nonisolated static func pullWork(_ checkout: Checkout) -> CheckoutActionResult {
+        let status = GitClient.checkoutStatuses(host: checkout.host, paths: [checkout.path])[checkout.path]
+        let failure: String?
+        if case .failure(let error) = status { failure = message(for: error) } else { failure = nil }
+        if case .skip(let reason) = RepositoryOverviewLogic.pullDecision(
+            status: try? status?.get(),
+            failure: failure
+        ) {
+            return .skipped(reason)
+        }
         do {
             _ = try client(for: checkout).pullFastForwardOnly()
             return .pulled

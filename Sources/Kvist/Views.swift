@@ -475,7 +475,7 @@ struct MissingFolderView: View {
             .frame(width: 210, height: 34)
 
             Button("Close Tab") {
-                tabsModel.close(tab.id)
+                tabsModel.closeTab(tab.id)
             }
             .buttonStyle(.plain)
             .font(AppType.rowDetail)

@@ -4403,6 +4403,14 @@ enum GraphLayout {
 
 extension GitClient {
     private static let originArguments = ["config", "--get", "remote.origin.url"]
+    /// Empty at the top of a work tree. Git looks upward for a repository,
+    /// so a checkout whose `.git` is gone would otherwise report the
+    /// enclosing repository.
+    private static let prefixArguments = ["rev-parse", "--show-prefix"]
+    private static let notRepositoryRoot = GitCommandError(
+        command: "git rev-parse",
+        output: "The folder is no longer the top of a Git repository."
+    )
 
     /// The status and origin of several checkouts on one machine, keyed by
     /// path. Over SSH this is one round trip, and an unreachable host fails
@@ -4436,6 +4444,10 @@ extension GitClient {
                     guard FileManager.default.fileExists(atPath: path) else {
                         throw GitCommandError(command: "git status", output: "The folder is missing.")
                     }
+                    guard try client.run(prefixArguments)
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw notRepositoryRoot
+                    }
                     return status(
                         statusOutput: try client.run(repositoryStatusArguments),
                         originOutput: try client.run(originArguments, allowedExitCodes: [0, 1])
@@ -4447,6 +4459,7 @@ extension GitClient {
 
         let commands = paths.flatMap { path in
             [
+                remoteCommand(path: path, gitArguments: prefixArguments),
                 remoteCommand(path: path, gitArguments: configuredGitArguments(repositoryStatusArguments)),
                 remoteCommand(path: path, gitArguments: originArguments)
             ]
@@ -4462,8 +4475,15 @@ extension GitClient {
         }
         var results: [String: Result<CheckoutStatus, Error>] = [:]
         for (index, path) in paths.enumerated() {
-            let statusResult = remoteResults[index * 2]
-            let originResult = remoteResults[index * 2 + 1]
+            let prefixResult = remoteResults[index * 3]
+            let statusResult = remoteResults[index * 3 + 1]
+            let originResult = remoteResults[index * 3 + 2]
+            if prefixResult.exitCode == 0,
+               !String(decoding: prefixResult.output, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                results[path] = .failure(notRepositoryRoot)
+                continue
+            }
             guard statusResult.exitCode == 0 else {
                 results[path] = .failure(GitCommandError(
                     command: "git status",
