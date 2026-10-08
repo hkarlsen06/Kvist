@@ -89,6 +89,12 @@ final class CheckoutTests: XCTestCase {
         XCTAssertEqual(list[0].label(for: remote), "devbox")
         XCTAssertEqual(PickerRepository.list(recent: [], known: [local, remote, other], query: "alp").map(\.name), ["alpha"])
         XCTAssertEqual(PickerRepository.list(recent: [], known: [local, remote], query: "devbox").count, 1)
+
+        let folder = Checkout(host: nil, path: "/other/kvist")
+        let named = PickerRepository.list(recent: [], known: [local, folder])
+        XCTAssertEqual(named.map { $0.label(for: $0.checkouts[0]) }, ["This Mac · /code", "This Mac · /other"])
+        XCTAssertTrue(PickerRepository.isGone("fatal: cannot change to '/srv/x': No such file or directory"))
+        XCTAssertFalse(PickerRepository.isGone("ssh: connect to host devbox port 22: Operation timed out"))
     }
 
     @MainActor

@@ -13,15 +13,32 @@ struct PickerRepository: Identifiable, Equatable {
     let preferred: Checkout
     /// Position in the recent list, or nil when never opened recently.
     let recentRank: Int?
+    /// Another repository in the list has the same name, so labels name
+    /// the parent folder.
+    var sharesName = false
 
     var isLocal: Bool { checkouts.contains { $0.host == nil } }
 
     /// The machine name, with the folder name when the folder differs from
-    /// the repository's name or one machine has several checkouts.
+    /// the repository's name or one machine has several checkouts, and the
+    /// parent folder when another repository has the same name.
     func label(for checkout: Checkout) -> String {
+        if sharesName {
+            let parent = (checkout.path as NSString).deletingLastPathComponent
+            let shown = checkout.host == nil ? (parent as NSString).abbreviatingWithTildeInPath : parent
+            return "\(checkout.machineName) · \(shown)"
+        }
         let sameMachine = checkouts.filter { $0.host == checkout.host }
         guard checkout.name != name || sameMachine.count > 1 else { return checkout.machineName }
         return "\(checkout.machineName) · \(checkout.name)"
+    }
+
+    /// Git's answer when the folder of a checkout no longer exists or no
+    /// longer holds the repository, as opposed to an unreachable host.
+    static func isGone(_ failure: String?) -> Bool {
+        guard let failure else { return false }
+        return ["No such file or directory", "The folder is missing", "no longer the top of a Git repository"]
+            .contains { failure.contains($0) }
     }
 
     /// Merges recent, registered, and discovered checkouts into repositories.
@@ -53,7 +70,7 @@ struct PickerRepository: Identifiable, Equatable {
             groups[key, default: []].append(checkout)
         }
 
-        let repositories = groupOrder.compactMap { key -> PickerRepository? in
+        var repositories = groupOrder.compactMap { key -> PickerRepository? in
             guard let members = groups[key] else { return nil }
             let checkouts = members.sorted {
                 ($0.host == nil ? 0 : 1, $0.host ?? "", $0.path)
@@ -69,6 +86,10 @@ struct PickerRepository: Identifiable, Equatable {
                 preferred: preferred,
                 recentRank: rank
             )
+        }
+        let names = repositories.map(\.name)
+        for index in repositories.indices {
+            repositories[index].sharesName = names.filter { $0 == repositories[index].name }.count > 1
         }
         let query = query.trimmingCharacters(in: .whitespaces).lowercased()
         return repositories
@@ -106,7 +127,9 @@ struct RepositoryPickerList: View {
     private static let rescanAge: TimeInterval = 6 * 60 * 60
     private static let filterThreshold = 8
 
-    private var recent: [Checkout] {
+    /// Recents opened before Kvist read origins have none until the task
+    /// below reads their status.
+    private var allRecent: [Checkout] {
         tabsModel.recentRepositoryURLs.map { url in
             if let remote = SSHRepository.mirrored(at: url) {
                 return Checkout(host: remote.host, path: remote.path)
@@ -115,10 +138,16 @@ struct RepositoryPickerList: View {
         }
     }
 
-    /// Local checkouts whose folder is gone are left out, as recents are.
+    private var recent: [Checkout] {
+        allRecent.filter { !PickerRepository.isGone(registry.failures[$0.id]) }
+    }
+
+    /// Local checkouts whose folder is gone are left out, as recents are,
+    /// and so are checkouts whose last status read found the folder gone.
     private var known: [Checkout] {
         (registry.checkouts + hosts.discovered).filter {
-            $0.host != nil || FileManager.default.fileExists(atPath: $0.path)
+            ($0.host != nil || FileManager.default.fileExists(atPath: $0.path))
+                && !PickerRepository.isGone(registry.failures[$0.id])
         }
     }
 
@@ -170,6 +199,10 @@ struct RepositoryPickerList: View {
         .frame(width: 360)
         .task {
             await hosts.discover(maximumAge: Self.rescanAge)
+        }
+        .task(id: allRecent.map(\.id)) {
+            let unknown = allRecent.filter { registry.checkout(id: $0.id)?.origin == nil }
+            await registry.refresh(unknown, maximumAge: 60 * 60)
         }
     }
 
