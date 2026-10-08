@@ -601,6 +601,48 @@ final class WorkspaceTabsModel: ObservableObject {
         }.map(\.element)
     }
 
+    /// Creates a worktree of the checkout's repository on the checkout's
+    /// machine and opens it. An open tab for the checkout does the work, so
+    /// its lists update. Otherwise Git runs in the checkout directly.
+    func addWorktree(branch: String, path: String, in base: Checkout) async {
+        if let model = tabs.first(where: { $0.shows(base.worktree) })?.loadedModel,
+           model.repositoryURL != nil {
+            if let worktree = await model.addWorktree(branch: branch, path: path) {
+                open(Checkout(worktree: worktree, origin: base.origin))
+            }
+            return
+        }
+        let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = RepositoryModel.worktreePath(
+            path,
+            branch: branch,
+            mainPath: base.path,
+            currentPath: base.path,
+            isRemote: base.host != nil
+        )
+        do {
+            let remote = try base.host.map { try SSHRepository(host: $0, path: base.path) }
+            let client = GitClient(
+                repositoryURL: URL(fileURLWithPath: base.path, isDirectory: true),
+                sshRepository: remote
+            )
+            try await Task.detached(priority: .userInitiated) {
+                try client.addWorktree(path: path, branch: branch)
+            }.value
+        } catch {
+            let output = (error as? GitCommandError)?.output ?? error.localizedDescription
+            _ = AppDialog.run(
+                title: "Could Not Create Worktree",
+                message: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                actions: [AppDialogAction(title: "OK", role: .primary)]
+            )
+            return
+        }
+        let checkout = Checkout(host: base.host, path: path, origin: base.origin)
+        checkoutRegistry.register(checkout)
+        open(checkout)
+    }
+
     /// Opens the Nth checkout in the active tab's checkout bar, counting from 1.
     func openCheckout(at position: Int) {
         let tab = activeTab

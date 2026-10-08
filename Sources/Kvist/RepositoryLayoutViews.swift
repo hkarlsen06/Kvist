@@ -120,12 +120,27 @@ struct RepositoryWorktreeBar: View {
             || model.hasPendingChangeOperations
     }
 
+    /// Offers every machine with a checkout of the repository. Git runs in
+    /// that machine's first listed checkout, which is its main worktree when
+    /// Kvist knows it.
     private func createWorktree() {
+        var bases: [String: Checkout] = [:]
+        var machines: [String] = []
+        for checkout in tabsModel.checkouts(shownWith: tab)
+        where bases[checkout.machineName] == nil {
+            bases[checkout.machineName] = checkout
+            machines.append(checkout.machineName)
+        }
+        let current = tab.checkout?.machineName
         guard let input = GitPrompt.newWorktree(
-            defaultPath: model.defaultWorktreePath(for: "branch")
+            repositoryName: model.worktrees.first?.name ?? tab.displayName,
+            machines: machines,
+            machine: current
         ) else { return }
         Task {
-            if let worktree = await model.addWorktree(
+            if let machine = input.machine, machine != current, let base = bases[machine] {
+                await tabsModel.addWorktree(branch: input.branch, path: input.path, in: base)
+            } else if let worktree = await model.addWorktree(
                 branch: input.branch,
                 path: input.path
             ) {

@@ -4035,27 +4035,43 @@ final class RepositoryModel: ObservableObject {
 
     /// Where a new worktree goes when the user leaves the folder empty: next
     /// to the main worktree, named after the repository and the branch.
-    func defaultWorktreePath(for branch: String) -> String {
-        let mainPath = worktrees.first?.path ?? sshRepository?.path ?? repositoryURL?.path ?? ""
-        let folder = (mainPath as NSString).lastPathComponent + "-"
-            + branch.replacingOccurrences(of: "/", with: "-")
-        return ((mainPath as NSString).deletingLastPathComponent as NSString)
-            .appendingPathComponent(folder)
+    /// The folder for a new worktree of `branch`. An empty `input` means
+    /// `<repository>-<branch>` beside the main worktree. A relative one is
+    /// resolved against the current checkout, and `~` only on this Mac.
+    nonisolated static func worktreePath(
+        _ input: String,
+        branch: String,
+        mainPath: String,
+        currentPath: String,
+        isRemote: Bool
+    ) -> String {
+        var path = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.isEmpty {
+            let folder = (mainPath as NSString).lastPathComponent + "-"
+                + branch.replacingOccurrences(of: "/", with: "-")
+            return ((mainPath as NSString).deletingLastPathComponent as NSString)
+                .appendingPathComponent(folder)
+        }
+        if !isRemote {
+            path = (path as NSString).expandingTildeInPath
+        }
+        if !path.hasPrefix("/") {
+            path = (currentPath as NSString).appendingPathComponent(path)
+        }
+        return path
     }
 
     /// Creates the worktree and returns it so the caller can open it.
     func addWorktree(branch: String, path: String) async -> GitWorktree? {
         let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-        var path = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if path.isEmpty {
-            path = defaultWorktreePath(for: branch)
-        } else if sshRepository == nil {
-            path = (path as NSString).expandingTildeInPath
-        }
-        if !path.hasPrefix("/"),
-           let currentPath = sshRepository?.path ?? repositoryURL?.path {
-            path = (currentPath as NSString).appendingPathComponent(path)
-        }
+        let currentPath = sshRepository?.path ?? repositoryURL?.path ?? ""
+        let path = Self.worktreePath(
+            path,
+            branch: branch,
+            mainPath: worktrees.first?.path ?? currentPath,
+            currentPath: currentPath,
+            isRemote: sshRepository != nil
+        )
         guard await perform("Creating worktree for \(branch)…", operation: { [path] in
             try $0.addWorktree(path: path, branch: branch)
         }) else { return nil }

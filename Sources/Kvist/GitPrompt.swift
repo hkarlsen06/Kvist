@@ -221,27 +221,43 @@ enum GitPrompt {
         return (name, message.isEmpty ? nil : message)
     }
 
-    static func newWorktree(defaultPath: String) -> (branch: String, path: String)? {
+    /// Asks for a branch, a folder, and, when the repository has checkouts
+    /// on several machines, the machine. The folder's default sits beside
+    /// that machine's checkout, so it is not shown as one path.
+    static func newWorktree(
+        repositoryName: String,
+        machines: [String] = [],
+        machine: String? = nil
+    ) -> (branch: String, path: String, machine: String?)? {
+        let choosesMachine = machines.count > 1
+        var fields = [
+            AppDialogField(label: "Branch", placeholder: "Branch name"),
+            AppDialogField(
+                label: "Folder",
+                placeholder: "Optional. Defaults to \(repositoryName)-<branch> beside the checkout",
+                isRequired: false
+            )
+        ]
+        if choosesMachine {
+            fields.insert(
+                AppDialogField(label: "Machine", value: machine ?? machines[0], choices: machines),
+                at: 0
+            )
+        }
         let result = AppDialog.run(
             title: "New Worktree",
-            message: "Check out a branch in its own folder. Kvist creates the branch from the current HEAD if it does not exist.",
-            fields: [
-                AppDialogField(label: "Branch", placeholder: "Branch name"),
-                AppDialogField(
-                    label: "Folder",
-                    placeholder: "Optional. Defaults to \(defaultPath)",
-                    isRequired: false
-                )
-            ],
+            message: "Check out a branch in its own folder. Kvist creates the branch from the checkout's current HEAD if it does not exist.",
+            fields: fields,
             actions: [
                 AppDialogAction(title: "Cancel", role: .cancel),
                 AppDialogAction(title: "Create Worktree", role: .primary)
             ]
         )
+        let values = choosesMachine ? Array(result.values.dropFirst()) : result.values
         guard result.actionIndex == 1,
-              result.values.count == 2,
-              !result.values[0].isEmpty else { return nil }
-        return (result.values[0], result.values[1])
+              values.count == 2,
+              !values[0].isEmpty else { return nil }
+        return (values[0], values[1], choosesMachine ? result.values[0] : nil)
     }
 
     static func confirmRemoveWorktree(_ worktree: GitWorktree) -> Bool {

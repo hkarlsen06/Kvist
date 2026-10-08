@@ -25,12 +25,22 @@ struct AppDialogField {
     let placeholder: String
     let isRequired: Bool
     let value: String
+    /// Shows a pop-up menu of these titles instead of a text field. `value`
+    /// picks the selected one, and the result holds the chosen title.
+    let choices: [String]
 
-    init(label: String, placeholder: String, isRequired: Bool = true, value: String = "") {
+    init(
+        label: String,
+        placeholder: String = "",
+        isRequired: Bool = true,
+        value: String = "",
+        choices: [String] = []
+    ) {
         self.label = label
         self.placeholder = placeholder
         self.isRequired = isRequired
         self.value = value
+        self.choices = choices
     }
 }
 
@@ -73,19 +83,27 @@ enum AppDialog {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        let textFields = fields.map { field in
+        let controls: [NSControl] = fields.map { field in
+            if !field.choices.isEmpty {
+                let popUp = NSPopUpButton()
+                popUp.addItems(withTitles: field.choices)
+                popUp.selectItem(withTitle: field.value)
+                popUp.setAccessibilityLabel(field.label)
+                return popUp
+            }
             let textField = NSTextField()
             textField.placeholderString = field.placeholder
             textField.stringValue = field.value
             textField.setAccessibilityLabel(field.label)
             return textField
         }
-        if !textFields.isEmpty {
-            let rows = zip(fields, textFields).map { field, textField in
+        let textFields = controls.compactMap { $0 as? NSTextField }
+        if !controls.isEmpty {
+            let rows = zip(fields, controls).map { field, control in
                 let label = NSTextField(labelWithString: field.label)
                 label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-                textField.widthAnchor.constraint(equalToConstant: 360).isActive = true
-                let row = NSStackView(views: [label, textField])
+                control.widthAnchor.constraint(equalToConstant: 360).isActive = true
+                let row = NSStackView(views: [label, control])
                 row.orientation = .vertical
                 row.alignment = .leading
                 row.spacing = 4
@@ -119,9 +137,10 @@ enum AppDialog {
         // Keep the primary action disabled until every required field has
         // text, so the dialog never closes without doing anything.
         let updatePrimaryButton = {
-            primaryButton?.isEnabled = !zip(fields, textFields).contains { field, textField in
+            primaryButton?.isEnabled = !zip(fields, controls).contains { field, control in
                 field.isRequired
-                    && textField.stringValue
+                    && control is NSTextField
+                    && control.stringValue
                         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         }
@@ -144,8 +163,9 @@ enum AppDialog {
         let actionIndex = orderedActions.indices.contains(responseIndex)
             ? orderedActions[responseIndex].offset
             : nil
-        let values = textFields.map {
-            $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let values = controls.map { control in
+            (control as? NSPopUpButton)?.titleOfSelectedItem
+                ?? control.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let actionIndex,
            actions[actionIndex].role == .primary,

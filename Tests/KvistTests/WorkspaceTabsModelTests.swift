@@ -665,6 +665,46 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertEqual(tabsModel.tabs.count, 4)
     }
 
+    func testWorktreePathDefaultsBesideTheMainWorktree() {
+        XCTAssertEqual(
+            RepositoryModel.worktreePath("", branch: "feat/x", mainPath: "/srv/repo", currentPath: "/srv/repo-y", isRemote: true),
+            "/srv/repo-feat-x"
+        )
+        XCTAssertEqual(
+            RepositoryModel.worktreePath("wt", branch: "x", mainPath: "/srv/repo", currentPath: "/srv/repo", isRemote: true),
+            "/srv/repo/wt"
+        )
+        XCTAssertEqual(
+            RepositoryModel.worktreePath("~/wt", branch: "x", mainPath: "/srv/repo", currentPath: "/srv/repo", isRemote: true),
+            "/srv/repo/~/wt"
+        )
+    }
+
+    func testAddingAWorktreeToACheckoutWithoutATabOpensIt() async throws {
+        let base = try repository(origin: "git@github.com:me/x.git")
+        let worktreePath = base.path + "-feature"
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(atPath: worktreePath)
+        }
+        _ = try GitClient(repositoryURL: base).run([
+            "-c", "user.name=Kvist", "-c", "user.email=kvist@example.com",
+            "commit", "--allow-empty", "-m", "Start"
+        ])
+        let tabsModel = WorkspaceTabsModel(defaults: isolatedDefaults(), restoreSavedTabs: false)
+
+        await tabsModel.addWorktree(
+            branch: "feature",
+            path: "",
+            in: Checkout(host: nil, path: base.path, origin: "github.com/me/x")
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath + "/.git"))
+        XCTAssertEqual(tabsModel.activeTab.checkout?.path, worktreePath)
+        XCTAssertEqual(tabsModel.activeTab.origin, "github.com/me/x")
+        XCTAssertNotNil(tabsModel.checkoutRegistry.checkout(id: Checkout(host: nil, path: worktreePath).id))
+    }
+
     func testCloseOthersKeepsOnlyTheGivenTab() {
         let tabsModel = WorkspaceTabsModel(
             defaults: isolatedDefaults(),
