@@ -1772,13 +1772,17 @@ struct ReferenceContextMenuItems: View {
                 createGitHubPullRequestButton(for: reference)
             }
 
-            if canMergeIntoCurrent {
+            if canMergeIntoCurrent || !rebaseTargets.isEmpty {
                 Divider()
 
-                mergeIntoCurrentButton
+                if canMergeIntoCurrent {
+                    mergeIntoCurrentButton
+                }
+
+                rebaseAction
             }
 
-            if !commitIsHead || canMergeIntoCurrent {
+            if !commitIsHead || canMergeIntoCurrent || !rebaseTargets.isEmpty {
                 Divider()
             }
 
@@ -1883,7 +1887,7 @@ struct ReferenceContextMenuItems: View {
         if rebaseTargets.count == 1, let target = rebaseTargets.first {
             rebaseButton(onto: target, includesBranchName: true)
         } else if !rebaseTargets.isEmpty {
-            Menu("Rebase \"\(reference.name)\" onto") {
+            Menu(rebaseTitle) {
                 if !localRebaseTargets.isEmpty {
                     Section("Branches") {
                         ForEach(localRebaseTargets) { target in
@@ -1910,7 +1914,7 @@ struct ReferenceContextMenuItems: View {
     ) -> some View {
         Button(
             includesBranchName
-                ? "Rebase \"\(reference.name)\" onto \"\(target.name)\""
+                ? "\(rebaseTitle) \"\(target.name)\""
                 : target.name
         ) {
             Task { await model.rebase(reference, onto: target) }
@@ -1984,9 +1988,29 @@ struct ReferenceContextMenuItems: View {
             && (reference.kind == .localBranch || !model.headContains(reference))
     }
 
+    /// A remote branch is rebased as a new local branch of the same name.
+    private var rebaseTitle: String {
+        guard let localName = reference.remoteBranchComponents?.branch else {
+            return "Rebase \"\(reference.name)\" onto"
+        }
+        return "Check Out \"\(localName)\" and Rebase onto"
+    }
+
     private var rebaseTargets: [GitReference] {
-        guard reference.kind == .localBranch,
-              !reference.isRemoteDefaultBranch(in: model.references) else { return [] }
+        switch reference.kind {
+        case .localBranch:
+            guard !reference.isRemoteDefaultBranch(in: model.references) else { return [] }
+        case .remoteBranch:
+            // A local branch of that name has its own menu, and the remote's
+            // default branch is the base, not something to rebase.
+            guard let localName = reference.remoteBranchComponents?.branch,
+                  localName != "HEAD",
+                  !model.references.contains(where: {
+                      $0.id == "refs/heads/\(localName)" || $0.symbolicTarget == reference.id
+                  }) else { return [] }
+        case .tag, .other:
+            return []
+        }
         return model.references
             .filter {
                 ($0.kind == .localBranch || $0.kind == .remoteBranch)

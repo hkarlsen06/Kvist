@@ -3307,8 +3307,17 @@ final class RepositoryModel: ObservableObject {
 
     /// Whether rebasing `branch` onto `base` would replay any commits. When
     /// one contains the other, a rebase does nothing or only fast-forwards.
+    /// Divergence goes both ways, so the base's column answers for a remote
+    /// branch, which has none of its own. Unknown pairs allow a local branch
+    /// and rule out a remote one.
     func canRebase(_ branch: GitReference, onto base: GitReference) -> Bool {
-        divergedReferenceIDsByBranch[branch.id]?.contains(base.id) ?? true
+        if let diverged = divergedReferenceIDsByBranch[branch.id] {
+            return diverged.contains(base.id)
+        }
+        if let diverged = divergedReferenceIDsByBranch[base.id] {
+            return diverged.contains(branch.id)
+        }
+        return branch.kind == .localBranch
     }
 
     /// Whether the remote branch's remote has a default branch that already

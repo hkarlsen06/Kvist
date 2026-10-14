@@ -2629,6 +2629,9 @@ struct GitClient: Sendable {
     }
 
     func rebase(_ branch: GitReference, onto base: GitReference) throws {
+        if branch.kind == .remoteBranch {
+            return try rebaseAsLocalBranch(branch, onto: base)
+        }
         guard branch.kind == .localBranch else {
             throw manualIntegrationError(
                 "Check out \(branch.name) as a local branch before rebasing it."
@@ -2680,6 +2683,33 @@ struct GitClient: Sendable {
                     switchArguments: ["--", currentBranch],
                     checkoutArguments: [currentBranch]
                 )
+            }
+            throw error
+        }
+    }
+
+    /// Creates the local branch that tracks `remoteBranch` and rebases it.
+    /// When the rebase cannot start, the new branch is deleted again.
+    private func rebaseAsLocalBranch(_ remoteBranch: GitReference, onto base: GitReference) throws {
+        guard let localName = remoteBranch.remoteBranchComponents?.branch else {
+            throw manualIntegrationError("\(remoteBranch.name) is not a remote branch.")
+        }
+        let branchName = try validatedBranchName(localName)
+        let localID = "refs/heads/\(branchName)"
+        guard (try? run(["show-ref", "--verify", "--quiet", localID])) == nil else {
+            throw manualIntegrationError(
+                "A local branch named \(branchName) already exists. Rebase that branch instead."
+            )
+        }
+        _ = try run(["branch", "--track", branchName, try resolvedReference(remoteBranch)])
+        let local = GitReference(id: localID, name: branchName, kind: .localBranch, isHead: false)
+        do {
+            try rebase(local, onto: base)
+        } catch {
+            // A rebase stopped on conflicts still needs the branch. Git
+            // refuses to delete it while it is checked out.
+            if operationInProgress() != .rebase {
+                _ = try? run(["branch", "-D", branchName])
             }
             throw error
         }

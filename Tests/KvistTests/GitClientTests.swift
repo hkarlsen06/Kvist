@@ -544,6 +544,48 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(committed.graph.compactMap(\.commit).first?.subject, "Initial commit")
     }
 
+    func testRebasingARemoteBranchCreatesTheLocalBranchFirst() throws {
+        let originURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KvistRemoteRebase-\(UUID().uuidString).git")
+        defer { try? FileManager.default.removeItem(at: originURL) }
+        try commitFile("one.txt", "one")
+        try git(["init", "--bare", "-b", "main", originURL.path])
+        try git(["remote", "add", "origin", originURL.path])
+        try git(["switch", "-c", "feature"])
+        try commitFile("feature.txt", "feature")
+        try git(["push", "origin", "main", "feature"])
+        try git(["switch", "main"])
+        try git(["branch", "-D", "feature"])
+        try commitFile("two.txt", "two")
+        let client = GitClient(repositoryURL: repositoryURL)
+        let remote = GitReference(
+            id: "refs/remotes/origin/feature",
+            name: "origin/feature",
+            kind: .remoteBranch,
+            isHead: false
+        )
+        let main = GitReference(id: "refs/heads/main", name: "main", kind: .localBranch, isHead: false)
+
+        // A dirty tree stops the rebase before it starts and leaves no branch.
+        try "dirty\n".write(
+            to: repositoryURL.appendingPathComponent("two.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertThrowsError(try client.rebase(remote, onto: main))
+        XCTAssertEqual(try git(["branch", "--list", "feature"]), "")
+        try git(["checkout", "--", "two.txt"])
+
+        try client.rebase(remote, onto: main)
+
+        XCTAssertEqual(try git(["rev-parse", "feature~1"]), try git(["rev-parse", "main"]))
+        XCTAssertEqual(
+            try git(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "origin/feature"
+        )
+    }
+
     func testSnapshotListsCommitsOriginDoesNotHave() throws {
         let originURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("KvistUnpushedOrigin-\(UUID().uuidString).git")

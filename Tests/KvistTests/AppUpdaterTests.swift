@@ -74,5 +74,19 @@ final class AppUpdaterTests: XCTestCase {
             AppUpdater.releaseNotesSummary(plain),
             "Kvist 0.3.1 improves previews.\n\n- WebP previews work."
         )
+
+        let current = """
+        Kvist 0.7.0 clones repositories.
+
+        - Clone to Another Machine.
+
+        Update from Kvist 0.6 using Kvist > Check for Updates. Requires macOS 26 or later.
+
+        Full changelog: https://example.com
+        """
+        XCTAssertEqual(
+            AppUpdater.releaseNotesSummary(current),
+            "Kvist 0.7.0 clones repositories.\n\n- Clone to Another Machine."
+        )
     }
 }

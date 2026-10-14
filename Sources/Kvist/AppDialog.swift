@@ -56,6 +56,7 @@ enum AppDialog {
         message: String,
         fields: [AppDialogField] = [],
         disclosure: AppDialogDisclosure? = nil,
+        accessory: NSView? = nil,
         actions: [AppDialogAction]
     ) -> AppDialogResult {
         if let disclosure {
@@ -70,6 +71,7 @@ enum AppDialog {
             title: title,
             message: message,
             fields: fields,
+            accessory: accessory,
             actions: actions
         )
     }
@@ -78,11 +80,13 @@ enum AppDialog {
         title: String,
         message: String,
         fields: [AppDialogField],
+        accessory: NSView?,
         actions: [AppDialogAction]
     ) -> AppDialogResult {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
+        alert.accessoryView = accessory
         let controls: [NSControl] = fields.map { field in
             if !field.choices.isEmpty {
                 let popUp = NSPopUpButton()
