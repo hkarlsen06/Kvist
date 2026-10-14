@@ -98,6 +98,52 @@ final class CheckoutTests: XCTestCase {
         XCTAssertFalse(CheckoutRegistry.isGone("ssh: connect to host devbox port 22: Operation timed out"))
     }
 
+    func testPickerSortsOpenLastAndOthersByLastCommit() {
+        let old = Checkout(host: nil, path: "/code/old", lastCommit: Date(timeIntervalSince1970: 1))
+        let new = Checkout(host: "devbox", path: "/srv/new", lastCommit: Date(timeIntervalSince1970: 2))
+        let open = Checkout(host: nil, path: "/code/open", lastCommit: Date(timeIntervalSince1970: 3))
+        let none = Checkout(host: nil, path: "/code/aaa")
+        let recent = Checkout(host: nil, path: "/code/zzz")
+
+        let list = PickerRepository.list(
+            recent: [open, recent],
+            known: [old, new, open, none, recent],
+            isOpen: { $0.id == open.id }
+        )
+        XCTAssertEqual(list.map(\.name), ["zzz", "new", "old", "aaa", "open"])
+
+        XCTAssertEqual(list[1].missingMachines(hosts: ["me@devbox", "box"]), [nil, "box"])
+        XCTAssertEqual(PickerRepository.clonePath(like: Checkout(host: nil, path: "/Users/me/repo/kvist")), "~/repo/kvist")
+        XCTAssertEqual(PickerRepository.clonePath(like: Checkout(host: "box", path: "/root/kvist")), "~/kvist")
+        XCTAssertEqual(PickerRepository.clonePath(like: Checkout(host: "box", path: "/srv/kvist")), "~/kvist")
+    }
+
+    func testCloneCheckoutFromOriginOntoThisMac() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CheckoutTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bare = directory.appendingPathComponent("remote.git")
+        _ = try GitClient(repositoryURL: directory).run(["init", "-q", "--bare", bare.path])
+        let source = directory.appendingPathComponent("source")
+        _ = try GitClient(repositoryURL: directory).run(["clone", "-q", bare.path, source.path])
+
+        let path = try GitClient.cloneCheckout(
+            of: Checkout(host: nil, path: source.path),
+            fromOrigin: true,
+            to: nil,
+            path: directory.appendingPathComponent("nested/copy").path
+        )
+        XCTAssertEqual(
+            try GitClient(repositoryURL: URL(fileURLWithPath: path)).run(["config", "--get", "remote.origin.url"])
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            bare.path
+        )
+        XCTAssertThrowsError(try GitClient.cloneCheckout(
+            of: Checkout(host: nil, path: source.path), fromOrigin: true, to: nil, path: path
+        ))
+    }
+
     @MainActor
     func testHostsModelKeepsDiscoveriesAcrossLaunches() {
         let defaults = UserDefaults(suiteName: "CheckoutTests-\(UUID().uuidString)")!

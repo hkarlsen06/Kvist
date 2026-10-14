@@ -10,11 +10,15 @@ struct Checkout: Codable, Hashable, Identifiable, Sendable {
     /// The `origin` remote's URL after `normalizedOrigin`, or nil before
     /// Kvist reads it or when the repository has no usable origin.
     var origin: String?
+    /// The date of the last commit on HEAD, read by repository scans. The
+    /// welcome screen sorts by it.
+    var lastCommit: Date?
 
-    init(host: String?, path: String, origin: String? = nil) {
+    init(host: String?, path: String, origin: String? = nil, lastCommit: Date? = nil) {
         self.host = host
         self.path = path
         self.origin = origin
+        self.lastCommit = lastCommit
     }
 
     var id: String { "\(host ?? ""):\(path)" }
@@ -78,6 +82,7 @@ struct CheckoutStatus: Equatable, Sendable {
     var changeCount: Int
     var origin: String?
     var updatedAt: Date
+    var lastCommit: Date? = nil
 
     var isClean: Bool { changeCount == 0 }
 }

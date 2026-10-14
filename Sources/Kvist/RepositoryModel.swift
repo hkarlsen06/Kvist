@@ -673,6 +673,45 @@ final class RepositoryModel: ObservableObject {
         }
     }
 
+    /// Clones a repository onto a machine that has no checkout of it, as
+    /// `GitClient.cloneCheckout` describes. Returns the new checkout, or nil
+    /// after showing the error.
+    func cloneCheckout(
+        of source: Checkout,
+        fromOrigin: Bool,
+        to host: String?,
+        path: String
+    ) async -> Checkout? {
+        guard !isBusy,
+              !isSavingRepositoryFile,
+              !isGeneratingCommitMessage,
+              !hasPendingChangeOperations else { return nil }
+        isBusy = true
+        activity = "Cloning \(source.name)…"
+        let cloneTask = Task.detached(priority: .userInitiated) {
+            URL(fileURLWithPath: try GitClient.cloneCheckout(
+                of: source, fromOrigin: fromOrigin, to: host, path: path
+            ))
+        }
+        repositoryCloneTask = cloneTask
+        defer {
+            repositoryCloneTask = nil
+            isBusy = false
+        }
+        do {
+            let url = try await withTaskCancellationHandler {
+                try await cloneTask.value
+            } onCancel: {
+                cloneTask.cancel()
+            }
+            return Checkout(host: host, path: url.path, origin: source.origin)
+        } catch {
+            activity = repositoryURL == nil ? "Ready" : "Up to date"
+            if !(error is CancellationError) { present(error) }
+            return nil
+        }
+    }
+
     private func cloneCheckoutName(from remoteURL: String) -> String {
         let candidate = remoteURL
             .trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))

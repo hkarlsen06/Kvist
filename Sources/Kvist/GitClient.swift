@@ -4403,6 +4403,8 @@ enum GraphLayout {
 
 extension GitClient {
     private static let originArguments = ["config", "--get", "remote.origin.url"]
+    /// Fails in a repository without commits, which leaves the date nil.
+    private static let lastCommitArguments = ["log", "-1", "--format=%ct", "HEAD"]
     /// Empty at the top of a work tree. Git looks upward for a repository,
     /// so a checkout whose `.git` is gone would otherwise report the
     /// enclosing repository.
@@ -4420,7 +4422,7 @@ extension GitClient {
         paths: [String]
     ) -> [String: Result<CheckoutStatus, Error>] {
         let parser = GitClient(repositoryURL: URL(fileURLWithPath: "/"))
-        func status(statusOutput: String, originOutput: String) -> CheckoutStatus {
+        func status(statusOutput: String, originOutput: String, lastCommitOutput: String) -> CheckoutStatus {
             let parsed = parser.parseRepositoryStatus(statusOutput)
             let changedPaths = Set(
                 (parsed.workingTree.staged + parsed.workingTree.unstaged).map(\.path)
@@ -4432,7 +4434,9 @@ extension GitClient {
                 hasUpstream: parsed.hasUpstream,
                 changeCount: changedPaths.count,
                 origin: Checkout.normalizedOrigin(originOutput),
-                updatedAt: Date()
+                updatedAt: Date(),
+                lastCommit: TimeInterval(lastCommitOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .map { Date(timeIntervalSince1970: $0) }
             )
         }
 
@@ -4450,7 +4454,8 @@ extension GitClient {
                     }
                     return status(
                         statusOutput: try client.run(repositoryStatusArguments),
-                        originOutput: try client.run(originArguments, allowedExitCodes: [0, 1])
+                        originOutput: try client.run(originArguments, allowedExitCodes: [0, 1]),
+                        lastCommitOutput: (try? client.run(lastCommitArguments, allowedExitCodes: [0, 128])) ?? ""
                     )
                 }
             }
@@ -4461,7 +4466,8 @@ extension GitClient {
             [
                 remoteCommand(path: path, gitArguments: prefixArguments),
                 remoteCommand(path: path, gitArguments: configuredGitArguments(repositoryStatusArguments)),
-                remoteCommand(path: path, gitArguments: originArguments)
+                remoteCommand(path: path, gitArguments: originArguments),
+                remoteCommand(path: path, gitArguments: lastCommitArguments)
             ]
         }
         let remoteResults: [RemoteCommandResult]
@@ -4475,9 +4481,10 @@ extension GitClient {
         }
         var results: [String: Result<CheckoutStatus, Error>] = [:]
         for (index, path) in paths.enumerated() {
-            let prefixResult = remoteResults[index * 3]
-            let statusResult = remoteResults[index * 3 + 1]
-            let originResult = remoteResults[index * 3 + 2]
+            let prefixResult = remoteResults[index * 4]
+            let statusResult = remoteResults[index * 4 + 1]
+            let originResult = remoteResults[index * 4 + 2]
+            let lastCommitResult = remoteResults[index * 4 + 3]
             if prefixResult.exitCode == 0,
                !String(decoding: prefixResult.output, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -4495,9 +4502,135 @@ extension GitClient {
                 statusOutput: String(decoding: statusResult.output, as: UTF8.self),
                 originOutput: originResult.exitCode == 0
                     ? String(decoding: originResult.output, as: UTF8.self)
+                    : "",
+                lastCommitOutput: lastCommitResult.exitCode == 0
+                    ? String(decoding: lastCommitResult.output, as: UTF8.self)
                     : ""
             ))
         }
         return results
+    }
+}
+
+extension GitClient {
+    /// Clones a repository into `path` on `host`, or on this Mac when `host`
+    /// is nil, and returns the new checkout's absolute path. A relative path
+    /// or one that starts with `~/` is under the home folder.
+    ///
+    /// With `fromOrigin`, the target machine clones the URL of `source`'s
+    /// origin remote. Otherwise it gets `source` itself. This Mac clones it
+    /// directly. An SSH host cannot reach this Mac, so this Mac pushes to an
+    /// empty repository there, through a temporary mirror when `source` is
+    /// on another host. The remote for `source`'s machine is named after
+    /// the machine, and `origin` keeps the source's origin URL, so the new
+    /// checkout groups with the others.
+    static func cloneCheckout(
+        of source: Checkout,
+        fromOrigin: Bool,
+        to host: String?,
+        path: String
+    ) throws -> String {
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, path != "~", !path.contains(where: { $0.isNewline || $0 == "\0" }) else {
+            throw GitCommandError(command: "git clone", output: "Enter a folder for the new checkout.")
+        }
+        let sourceClient = GitClient(
+            repositoryURL: URL(fileURLWithPath: source.path, isDirectory: true),
+            sshRepository: try source.host.map { try SSHRepository(host: $0, path: source.path) }
+        )
+        let originURL = try sourceClient.run(originArguments, allowedExitCodes: [0, 1])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if fromOrigin, originURL.isEmpty {
+            throw GitCommandError(command: "git clone", output: "\(source.location) has no origin remote.")
+        }
+        let url = fromOrigin ? originURL : source.location
+
+        func renameSourceRemote(in client: GitClient) throws {
+            guard !fromOrigin, source.host != nil else { return }
+            _ = try client.run(["remote", "rename", "origin", source.machineName])
+            if !originURL.isEmpty { _ = try client.run(["remote", "add", "origin", originURL]) }
+        }
+
+        guard let host else {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let destination = URL(
+                fileURLWithPath: (path as NSString).expandingTildeInPath,
+                isDirectory: true,
+                relativeTo: home
+            ).standardizedFileURL
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let root = try cloneRepository(from: url, to: destination)
+            try renameSourceRemote(in: GitClient(repositoryURL: root))
+            return root.path
+        }
+
+        // The remote shell starts in the home folder.
+        let target = shellQuote(path.hasPrefix("~/") ? String(path.dropFirst(2)) : path)
+        func runRemote(_ command: String) throws -> String {
+            String(decoding: try runSSH(host: host, command: command), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let createFolder = """
+        if [ -e \(target) ]; then printf '%s already exists.\\n' \(target) >&2; exit 1; fi
+        mkdir -p -- "$(dirname -- \(target))" && mkdir -- \(target) && cd -- \(target) || exit 1
+        """
+        if fromOrigin {
+            return try runRemote("""
+            \(createFolder)
+            if ! GIT_TERMINAL_PROMPT=0 git clone -q -- \(shellQuote(url)) .; then cd && rm -rf -- \(target); exit 1; fi
+            pwd
+            """)
+        }
+
+        // A mirror of a checkout on another host, so this Mac can push it.
+        var mirror: URL?
+        defer { mirror.map { try? FileManager.default.removeItem(at: $0) } }
+        let local: GitClient
+        if source.host == nil {
+            local = GitClient(repositoryURL: URL(fileURLWithPath: source.path, isDirectory: true))
+        } else {
+            let temporary = FileManager.default.temporaryDirectory
+                .appendingPathComponent("KvistClone-\(UUID().uuidString)", isDirectory: true)
+            mirror = temporary
+            _ = try GitClient(repositoryURL: FileManager.default.temporaryDirectory)
+                .run(["clone", "--mirror", "-q", "--", url, temporary.path])
+            local = GitClient(repositoryURL: temporary)
+        }
+        let branch = try local.run(["symbolic-ref", "-q", "--short", "HEAD"], allowedExitCodes: [0, 1])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only branches and tags are pushed, so a detached commit would not
+        // arrive.
+        guard !branch.isEmpty else {
+            throw GitCommandError(
+                command: "git push",
+                output: "\(source.location) is not on a branch. Check out a branch there first."
+            )
+        }
+        // `mkdir` without `-p` claims the folder, so cleanup never removes a
+        // folder that existed before.
+        let created = try runRemote("\(createFolder)\npwd")
+        do {
+            // A non-bare repository refuses a push to its current branch
+            // unless it updates the work tree, which fills the empty folder.
+            _ = try runRemote("""
+            cd -- \(shellQuote(created)) || exit 1
+            git init -q && git config receive.denyCurrentBranch updateInstead || exit 1
+            git symbolic-ref HEAD \(shellQuote("refs/heads/\(branch)"))
+            """)
+            _ = try local.run(["push", "-q", "\(host):\(created)", "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"])
+            let remote = GitClient(
+                repositoryURL: URL(fileURLWithPath: created, isDirectory: true),
+                sshRepository: try SSHRepository(host: host, path: created)
+            )
+            _ = try remote.run(["config", "--unset", "receive.denyCurrentBranch"])
+            if !originURL.isEmpty { _ = try remote.run(["remote", "add", "origin", originURL]) }
+        } catch {
+            _ = try? runSSH(host: host, command: "rm -rf -- \(shellQuote(created))")
+            throw error
+        }
+        return created
     }
 }

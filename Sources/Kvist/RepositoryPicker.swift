@@ -13,6 +13,10 @@ struct PickerRepository: Identifiable, Equatable {
     let preferred: Checkout
     /// Position in the recent list, or nil when never opened recently.
     let recentRank: Int?
+    /// The newest last commit across the checkouts.
+    let lastCommit: Date?
+    /// A tab already shows one of the checkouts.
+    let isOpen: Bool
     /// Another repository in the list has the same name, so the row shows
     /// the parent folder.
     var sharesName = false
@@ -38,17 +42,45 @@ struct PickerRepository: Identifiable, Equatable {
         return "\(checkout.machineName) · \(checkout.name)"
     }
 
+    /// This Mac, when nil, and the hosts without a checkout.
+    func missingMachines(hosts: [String]) -> [String?] {
+        let present = Set(checkouts.map(\.machineName))
+        return ([nil] + hosts.map { Optional($0) }).filter {
+            !present.contains(Checkout(host: $0, path: "").machineName)
+        }
+    }
+
+    /// A checkout with an origin, this Mac's first.
+    var originSource: Checkout? { checkouts.first { $0.origin != nil } }
+
+    /// The checkout's folder relative to its home folder, which is
+    /// `/Users/name` on a Mac, `/home/name` on Linux, or `/root`. Other
+    /// folders suggest `~/<name>`.
+    static func clonePath(like checkout: Checkout) -> String {
+        let parts = checkout.path.split(separator: "/")
+        let homeDepth = parts.first == "root" ? 1 : ["Users", "home"].contains(parts.first) ? 2 : 0
+        guard homeDepth > 0, parts.count > homeDepth else { return "~/\(checkout.name)" }
+        return "~/" + parts.dropFirst(homeDepth).joined(separator: "/")
+    }
 
     /// Merges recent, registered, and discovered checkouts into repositories.
-    /// Recently used repositories come first, the rest by name. A non-empty
-    /// `query` keeps repositories whose name, origin, machine, or path
-    /// contains it.
-    static func list(recent: [Checkout], known: [Checkout], query: String = "") -> [PickerRepository] {
+    /// Recently used repositories come first, then the rest by their last
+    /// commit, newest first, then by name. Repositories open in a tab go
+    /// last, since the tab row already shows them. A non-empty `query` keeps
+    /// repositories whose name, origin, machine, or path contains it.
+    static func list(
+        recent: [Checkout],
+        known: [Checkout],
+        query: String = "",
+        isOpen: (Checkout) -> Bool = { _ in false }
+    ) -> [PickerRepository] {
         var byID: [Checkout.ID: Checkout] = [:]
         var order: [Checkout.ID] = []
         for checkout in recent + known {
             if var existing = byID[checkout.id] {
                 existing.origin = existing.origin ?? checkout.origin
+                // Discoveries come last, and the latest scan has the newest date.
+                existing.lastCommit = checkout.lastCommit ?? existing.lastCommit
                 byID[checkout.id] = existing
             } else {
                 byID[checkout.id] = checkout
@@ -82,7 +114,9 @@ struct PickerRepository: Identifiable, Equatable {
                 name: preferred.name,
                 checkouts: checkouts,
                 preferred: preferred,
-                recentRank: rank
+                recentRank: rank,
+                lastCommit: checkouts.compactMap(\.lastCommit).max(),
+                isOpen: checkouts.contains(where: isOpen)
             )
         }
         let names = repositories.map(\.name)
@@ -101,13 +135,17 @@ struct PickerRepository: Identifiable, Equatable {
                     }
             }
             .sorted { first, second in
+                if first.isOpen != second.isOpen { return second.isOpen }
                 switch (first.recentRank, second.recentRank) {
                 case let (a?, b?): return a < b
                 case (_?, nil): return true
                 case (nil, _?): return false
-                case (nil, nil):
-                    return first.name.localizedStandardCompare(second.name) == .orderedAscending
+                case (nil, nil): break
                 }
+                if first.lastCommit != second.lastCommit {
+                    return (first.lastCommit ?? .distantPast) > (second.lastCommit ?? .distantPast)
+                }
+                return first.name.localizedStandardCompare(second.name) == .orderedAscending
             }
     }
 }
@@ -152,10 +190,10 @@ struct RepositoryPickerList: View {
     var body: some View {
         let recent = recent
         let known = known
-        let all = PickerRepository.list(recent: recent, known: known)
+        let all = PickerRepository.list(recent: recent, known: known, isOpen: tabsModel.isOpen)
         let repositories = query.isEmpty
             ? all
-            : PickerRepository.list(recent: recent, known: known, query: query)
+            : PickerRepository.list(recent: recent, known: known, query: query, isOpen: tabsModel.isOpen)
         VStack(alignment: .leading, spacing: 4) {
             header
 
@@ -177,7 +215,7 @@ struct RepositoryPickerList: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(repositories) { repository in
-                        PickerRepositoryRow(repository: repository, open: open)
+                        PickerRepositoryRow(repository: repository, open: open, clone: clone)
                     }
                 }
             }
@@ -239,6 +277,16 @@ struct RepositoryPickerList: View {
         .padding(.bottom, 4)
     }
 
+    private func clone(_ repository: PickerRepository, from source: Checkout, fromOrigin: Bool, to host: String?) {
+        Task {
+            if let checkout = await model.cloneCheckout(
+                repository, from: source, fromOrigin: fromOrigin, to: host, registry: registry
+            ) {
+                open(checkout)
+            }
+        }
+    }
+
     /// Selects a tab that already shows the checkout. Otherwise the welcome
     /// tab opens it, so no empty tab is left behind.
     private func open(_ checkout: Checkout) {
@@ -259,8 +307,10 @@ struct RepositoryPickerList: View {
 struct PickerRepositoryRow: View {
     @EnvironmentObject private var model: RepositoryModel
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    @EnvironmentObject private var hosts: SSHHostsModel
     let repository: PickerRepository
     let open: (Checkout) -> Void
+    let clone: (PickerRepository, Checkout, Bool, String?) -> Void
     @State private var hovering = false
 
     private var isDisabled: Bool {
@@ -301,6 +351,20 @@ struct PickerRepositoryRow: View {
             }
 
             Spacer(minLength: 0)
+
+            if !missingMachines.isEmpty {
+                Menu { cloneMenus } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(AppTheme.muted)
+                .disabled(isDisabled)
+                .help("Clone to another machine")
+                .accessibilityLabel("Clone to Another Machine")
+            }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
@@ -333,10 +397,22 @@ struct PickerRepositoryRow: View {
         .help("Open \(checkout.location)")
     }
 
+    private var missingMachines: [String?] {
+        repository.missingMachines(hosts: hosts.hosts)
+    }
+
+    private var cloneMenus: some View {
+        CloneToMachineMenus(repository: repository, hosts: hosts.hosts) { clone(repository, $0, $1, $2) }
+    }
+
     @ViewBuilder
     private var menu: some View {
         ForEach(repository.checkouts) { checkout in
             Button("Open on \(repository.label(for: checkout))") { open(checkout) }
+        }
+        if !missingMachines.isEmpty, !isDisabled {
+            Divider()
+            Menu("Clone to Another Machine") { cloneMenus }
         }
         if let local = repository.checkouts.first(where: { $0.host == nil }) {
             Divider()
@@ -359,5 +435,52 @@ struct PickerRepositoryRow: View {
                 }
             }
         }
+    }
+}
+
+/// One submenu per machine without a checkout of the repository, offering
+/// the origin remote and each existing checkout as the source. `clone`
+/// receives the source, whether to clone its origin, and the target host,
+/// which is nil for this Mac.
+struct CloneToMachineMenus: View {
+    let repository: PickerRepository
+    let hosts: [String]
+    let clone: (Checkout, Bool, String?) -> Void
+
+    var body: some View {
+        ForEach(repository.missingMachines(hosts: hosts), id: \.self) { host in
+            Menu("Clone to \(Checkout(host: host, path: "").machineName)") {
+                if let source = repository.originSource, let origin = source.origin {
+                    Button("From \(origin)") { clone(source, true, host) }
+                    Divider()
+                }
+                ForEach(repository.checkouts) { checkout in
+                    Button("From \(repository.label(for: checkout))") { clone(checkout, false, host) }
+                }
+            }
+        }
+    }
+}
+
+extension RepositoryModel {
+    /// Asks for a folder on the target machine, clones there, and registers
+    /// the new checkout. The suggested folder mirrors the source's place
+    /// under its home folder.
+    func cloneCheckout(
+        _ repository: PickerRepository,
+        from source: Checkout,
+        fromOrigin: Bool,
+        to host: String?,
+        registry: CheckoutRegistry
+    ) async -> Checkout? {
+        guard let path = GitPrompt.cloneCheckoutFolder(
+            repositoryName: repository.name,
+            machine: Checkout(host: host, path: "").machineName,
+            source: fromOrigin ? source.origin ?? source.location : source.location,
+            suggestion: PickerRepository.clonePath(like: fromOrigin ? repository.preferred : source)
+        ), let checkout = await cloneCheckout(of: source, fromOrigin: fromOrigin, to: host, path: path)
+        else { return nil }
+        registry.register(checkout)
+        return checkout
     }
 }

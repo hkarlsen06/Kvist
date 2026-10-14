@@ -117,6 +117,27 @@ enum GitPrompt {
         return value
     }
 
+    static func cloneCheckoutFolder(
+        repositoryName: String,
+        machine: String,
+        source: String,
+        suggestion: String
+    ) -> String? {
+        let result = AppDialog.run(
+            title: "Clone \(repositoryName) to \(machine)",
+            message: "Kvist clones from \(source). A folder that does not start with / is under the home folder.",
+            fields: [AppDialogField(label: "Folder", placeholder: suggestion, value: suggestion)],
+            actions: [
+                AppDialogAction(title: "Cancel", role: .cancel),
+                AppDialogAction(title: "Clone", role: .primary)
+            ]
+        )
+        guard result.actionIndex == 1,
+              let value = result.values.first,
+              !value.isEmpty else { return nil }
+        return value
+    }
+
     static func sshRepository() -> (host: String, path: String)? {
         let result = AppDialog.run(
             title: "Open over SSH",

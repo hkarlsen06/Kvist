@@ -277,16 +277,16 @@ final class SSHHostsModel: ObservableObject {
             output = try runLocalScan()
         }
         let paths = SSHBrowserRemote.parseSuggestions(output)
-        var origins: [String: String] = [:]
+        var statuses: [String: CheckoutStatus] = [:]
         for start in stride(from: 0, to: paths.count, by: statusBatchSize) {
             let batch = Array(paths[start..<min(start + statusBatchSize, paths.count)])
             for (path, result) in GitClient.checkoutStatuses(host: host, paths: batch) {
-                if case .success(let status) = result, let origin = status.origin {
-                    origins[path] = origin
-                }
+                if case .success(let status) = result { statuses[path] = status }
             }
         }
-        return paths.map { Checkout(host: host, path: $0, origin: origins[$0]) }
+        return paths.map {
+            Checkout(host: host, path: $0, origin: statuses[$0]?.origin, lastCommit: statuses[$0]?.lastCommit)
+        }
     }
 
     private nonisolated static func runLocalScan() throws -> Data {

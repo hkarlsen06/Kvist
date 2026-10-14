@@ -446,6 +446,8 @@ struct ActiveTabOutline: Shape {
 
 struct RepositoryTabItem: View {
     @EnvironmentObject private var tabsModel: WorkspaceTabsModel
+    @EnvironmentObject private var registry: CheckoutRegistry
+    @EnvironmentObject private var hosts: SSHHostsModel
     @ObservedObject var tab: RepositoryTab
     @ObservedObject var dragState: TabDragState<UUID>
     let tabID: UUID
@@ -632,6 +634,34 @@ struct RepositoryTabItem: View {
                     )
                 }
             }
+
+            if let repository = cloneableRepository {
+                Divider()
+                Menu("Clone to Another Machine") {
+                    CloneToMachineMenus(repository: repository, hosts: hosts.hosts) { source, fromOrigin, host in
+                        // An unopened tab has no model, so the active tab
+                        // shows the clone's progress.
+                        let model = tab.loadedModel ?? tabsModel.activeModel
+                        Task {
+                            if let checkout = await model.cloneCheckout(
+                                repository, from: source, fromOrigin: fromOrigin, to: host, registry: registry
+                            ) {
+                                tabsModel.open(checkout)
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// The tab's repository with its checkouts on every machine, when a
+    /// machine is missing one.
+    private var cloneableRepository: PickerRepository? {
+        guard let own = tab.checkout, tab.loadedModel?.isPlainFolder != true else { return nil }
+        let repository = PickerRepository.list(recent: [own], known: tabsModel.checkouts(shownWith: tab))
+            .first { $0.checkouts.contains { $0.id == own.id } }
+        guard let repository, !repository.missingMachines(hosts: hosts.hosts).isEmpty else { return nil }
+        return repository
     }
 }
