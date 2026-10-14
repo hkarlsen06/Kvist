@@ -136,6 +136,9 @@ final class RepositoryModel: ObservableObject {
     @Published private(set) var worktrees: [GitWorktree] = []
     @Published private(set) var fastForwardReferenceIDs: Set<String> = []
     @Published private(set) var branchesBehindHeadIDs: Set<String> = []
+    @Published private(set) var divergedReferenceIDsByBranch: [String: Set<String>] = [:]
+    @Published private(set) var containedReferenceIDsByBranch: [String: Set<String>] = [:]
+    @Published private(set) var commitsMissingFromOrigin: Set<String> = []
     @Published private(set) var graphScope: GraphScope = .all
     @Published private(set) var isLoadingMoreGraph = false
     @Published private(set) var workspaceMode: RepositoryWorkspaceMode = .sourceControl
@@ -3294,7 +3297,34 @@ final class RepositoryModel: ObservableObject {
     /// Whether the branch can move forward to HEAD without checking it out,
     /// for example main after rebasing the current branch onto it.
     func canFastForwardToHead(_ reference: GitReference) -> Bool {
+        reference.kind == .localBranch && headContains(reference)
+    }
+
+    /// Whether HEAD already has every commit of `reference`.
+    func headContains(_ reference: GitReference) -> Bool {
         branchesBehindHeadIDs.contains(reference.id)
+    }
+
+    /// Whether rebasing `branch` onto `base` would replay any commits. When
+    /// one contains the other, a rebase does nothing or only fast-forwards.
+    func canRebase(_ branch: GitReference, onto base: GitReference) -> Bool {
+        divergedReferenceIDsByBranch[branch.id]?.contains(base.id) ?? true
+    }
+
+    /// Whether the remote branch's remote has a default branch that already
+    /// has all its commits, so a pull request would be empty.
+    func remoteDefaultBranchContains(_ reference: GitReference) -> Bool {
+        guard let remote = reference.remoteBranchComponents?.remote,
+              let defaultID = references.first(where: {
+                  $0.id == "refs/remotes/\(remote)/HEAD"
+              })?.symbolicTarget else { return false }
+        return containedReferenceIDsByBranch[defaultID]?.contains(reference.id) ?? false
+    }
+
+    /// The checkout that has the branch, including the current one.
+    func worktree(checkingOut reference: GitReference) -> GitWorktree? {
+        guard reference.kind == .localBranch else { return nil }
+        return worktrees.first { $0.branch == reference.name }
     }
 
     @discardableResult
@@ -4083,6 +4113,15 @@ final class RepositoryModel: ObservableObject {
         }
         if branchesBehindHeadIDs != snapshot.branchesBehindHeadIDs {
             branchesBehindHeadIDs = snapshot.branchesBehindHeadIDs
+        }
+        if divergedReferenceIDsByBranch != snapshot.divergedReferenceIDsByBranch {
+            divergedReferenceIDsByBranch = snapshot.divergedReferenceIDsByBranch
+        }
+        if containedReferenceIDsByBranch != snapshot.containedReferenceIDsByBranch {
+            containedReferenceIDsByBranch = snapshot.containedReferenceIDsByBranch
+        }
+        if commitsMissingFromOrigin != snapshot.commitsMissingFromOrigin {
+            commitsMissingFromOrigin = snapshot.commitsMissingFromOrigin
         }
         graphHistoryOffset = snapshot.historyOffset
         graphHasMore = snapshot.graphHasMore

@@ -226,8 +226,16 @@ enum GitHistoryScope: Hashable, Sendable {
 struct FastForwardReferences: Equatable, Sendable {
     /// Branches HEAD can fast-forward to.
     var targets: Set<String>
-    /// Local branches that can fast-forward to HEAD.
+    /// Branches HEAD contains that are behind it. Local ones can
+    /// fast-forward to HEAD, and merging any of them changes nothing.
     var branchesBehindHead: Set<String>
+    /// For each local branch, the branches that have commits it lacks and
+    /// lack commits it has. Rebasing onto any other branch either does
+    /// nothing or is a fast-forward. A branch missing here is unknown.
+    var divergedByBranch: [String: Set<String>] = [:]
+    /// For each local branch and each remote's default branch, the branches
+    /// whose commits it already has.
+    var containedIn: [String: Set<String>] = [:]
 
     static let none = FastForwardReferences(targets: [], branchesBehindHead: [])
 }
@@ -282,8 +290,12 @@ struct RepositorySnapshot: Sendable {
     let isRebaseInProgress: Bool
     let activeOperation: GitOperation?
     let fastForwardReferenceIDs: Set<String>
-    /// Local branches that HEAD contains, which can move forward to HEAD.
+    /// Branches that HEAD contains and that are behind it.
     let branchesBehindHeadIDs: Set<String>
+    let divergedReferenceIDsByBranch: [String: Set<String>]
+    let containedReferenceIDsByBranch: [String: Set<String>]
+    /// Commits on HEAD or a local branch that no `origin` branch has.
+    let commitsMissingFromOrigin: Set<String>
     let historyOffset: Int
     let graphHasMore: Bool
     let graphLayoutState: GraphLayoutState
@@ -307,6 +319,9 @@ struct RepositorySnapshot: Sendable {
         activeOperation: nil,
         fastForwardReferenceIDs: [],
         branchesBehindHeadIDs: [],
+        divergedReferenceIDsByBranch: [:],
+        containedReferenceIDsByBranch: [:],
+        commitsMissingFromOrigin: [],
         historyOffset: 0,
         graphHasMore: false,
         graphLayoutState: GraphLayoutState(),
@@ -1187,8 +1202,11 @@ struct GitClient: Sendable {
             ? .none
             : {
                 guard !Task.isCancelled else { return .none }
-                return self.fastForwardReferences()
+                return self.fastForwardReferences(references: allReferences)
             }()
+        let commitsMissingFromOrigin = status.headHash == nil || Task.isCancelled
+            ? []
+            : self.commitsMissingFromOrigin(references: allReferences)
 
         try Task.checkCancellation()
 
@@ -1208,6 +1226,9 @@ struct GitClient: Sendable {
             activeOperation: activeOperation,
             fastForwardReferenceIDs: fastForwardReferences.targets,
             branchesBehindHeadIDs: fastForwardReferences.branchesBehindHead,
+            divergedReferenceIDsByBranch: fastForwardReferences.divergedByBranch,
+            containedReferenceIDsByBranch: fastForwardReferences.containedIn,
+            commitsMissingFromOrigin: commitsMissingFromOrigin,
             historyOffset: historyResult.nextOffset,
             graphHasMore: historyResult.hasMore,
             graphLayoutState: historyResult.layoutState,
@@ -1268,10 +1289,18 @@ struct GitClient: Sendable {
             )
         }
         let fastForwardTask = Task.detached(priority: .userInitiated) {
-            status.headHash == nil ? .none : self.fastForwardReferences()
+            status.headHash == nil
+                ? .none
+                : self.fastForwardReferences(references: referenceSnapshot.references)
+        }
+        let unpushedTask = Task.detached(priority: .userInitiated) {
+            status.headHash == nil
+                ? []
+                : self.commitsMissingFromOrigin(references: referenceSnapshot.references)
         }
         let historyResult = try await historyTask.value
         let fastForwardReferences = await fastForwardTask.value
+        let commitsMissingFromOrigin = await unpushedTask.value
         try Task.checkCancellation()
 
         return RepositorySnapshot(
@@ -1290,6 +1319,9 @@ struct GitClient: Sendable {
             activeOperation: activeOperation,
             fastForwardReferenceIDs: fastForwardReferences.targets,
             branchesBehindHeadIDs: fastForwardReferences.branchesBehindHead,
+            divergedReferenceIDsByBranch: fastForwardReferences.divergedByBranch,
+            containedReferenceIDsByBranch: fastForwardReferences.containedIn,
+            commitsMissingFromOrigin: commitsMissingFromOrigin,
             historyOffset: historyResult.nextOffset,
             graphHasMore: historyResult.hasMore,
             graphLayoutState: historyResult.layoutState,
@@ -3380,11 +3412,30 @@ struct GitClient: Sendable {
 
     /// One pass over the branches instead of a `--contains` and a
     /// `--merged` query. Git before 2.41 has no `ahead-behind` atom, so fall
-    /// back to finding only the fast-forward targets.
-    private func fastForwardReferences() -> FastForwardReferences {
+    /// back to finding only the fast-forward targets. Git counts every
+    /// `ahead-behind` column in the same walk, so the columns for local
+    /// branches and remote default branches cost little next to the HEAD
+    /// column.
+    private func fastForwardReferences(references: [GitReference]) -> FastForwardReferences {
+        let remoteDefaultIDs = references.compactMap { reference in
+            reference.remoteBranchComponents?.branch == "HEAD"
+                ? reference.symbolicTarget
+                : nil
+        }
+        // ponytail: capped at 50 local branches; past that the rebase menu
+        // lists every branch, as it did before this check.
+        let localIDs = references.filter { $0.kind == .localBranch }.map(\.id).prefix(50)
+        var baseIDs: [String] = []
+        for id in remoteDefaultIDs + localIDs
+        where !baseIDs.contains(id) && !id.contains("%") && !id.contains(")") {
+            baseIDs.append(id)
+        }
+        let format = (["%(refname)", "%(ahead-behind:HEAD)"]
+            + baseIDs.map { "%(ahead-behind:\($0))" })
+            .joined(separator: "%09")
         guard let output = try? run([
             "for-each-ref",
-            "--format=%(refname)%09%(ahead-behind:HEAD)",
+            "--format=\(format)",
             "refs/heads",
             "refs/remotes"
         ]) else {
@@ -3393,23 +3444,53 @@ struct GitClient: Sendable {
                 branchesBehindHead: []
             )
         }
-        return Self.parseFastForwardReferences(output)
+        return Self.parseFastForwardReferences(output, baseIDs: baseIDs)
+    }
+
+    /// GitHub only has commits that some `origin` branch has. Without any
+    /// `origin` branches, nothing is known, so return none.
+    private func commitsMissingFromOrigin(references: [GitReference]) -> Set<String> {
+        guard references.contains(where: { $0.remoteBranchComponents?.remote == "origin" }),
+              let output = try? run([
+                  // ponytail: capped; older unpushed commits past the cap
+                  // still offer View Commit on GitHub.
+                  "rev-list", "--max-count=5000",
+                  "HEAD", "--branches", "--not", "--remotes=origin"
+              ]) else { return [] }
+        return Set(output.split(whereSeparator: \.isNewline).map(String.init))
     }
 
     /// Each line is a ref name, then how many commits it has that HEAD does
-    /// not and how many HEAD has that it does not.
-    static func parseFastForwardReferences(_ output: String) -> FastForwardReferences {
+    /// not and how many HEAD has that it does not. The same pair of counts
+    /// follows for each of `baseIDs`, in order.
+    static func parseFastForwardReferences(
+        _ output: String,
+        baseIDs: [String] = []
+    ) -> FastForwardReferences {
         var result = FastForwardReferences.none
+        for baseID in baseIDs {
+            result.divergedByBranch[baseID] = []
+            result.containedIn[baseID] = []
+        }
         for line in output.split(whereSeparator: \.isNewline) {
             let fields = line.split(separator: "\t")
-            guard fields.count == 2 else { continue }
-            let counts = fields[1].split(separator: " ").compactMap { Int($0) }
-            guard counts.count == 2 else { continue }
+            guard fields.count == 2 + baseIDs.count else { continue }
+            let counts = fields.dropFirst().map {
+                $0.split(separator: " ").compactMap { Int($0) }
+            }
+            guard counts.allSatisfy({ $0.count == 2 }) else { continue }
             let name = String(fields[0])
-            if counts[1] == 0 {
+            if counts[0][1] == 0 {
                 result.targets.insert(name)
-            } else if counts[0] == 0, name.hasPrefix("refs/heads/") {
+            } else if counts[0][0] == 0 {
                 result.branchesBehindHead.insert(name)
+            }
+            for (baseID, count) in zip(baseIDs, counts.dropFirst()) {
+                if count[0] == 0 {
+                    result.containedIn[baseID, default: []].insert(name)
+                } else if count[1] > 0 {
+                    result.divergedByBranch[baseID, default: []].insert(name)
+                }
             }
         }
         return result

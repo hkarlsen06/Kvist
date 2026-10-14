@@ -1084,7 +1084,7 @@ struct GraphCommitRow: View {
             model.openCommitChanges(row.commit)
         }
 
-        if hasGitHubOrigin {
+        if hasGitHubOrigin, !model.commitsMissingFromOrigin.contains(row.commit.hash) {
             Button("View Commit on GitHub") {
                 Task {
                     if let url = await model.githubURL(for: row.commit) {
@@ -1736,6 +1736,16 @@ struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
+            copyNameButton
+
+            if let worktree = model.worktree(checkingOut: reference) {
+                Button("Copy Worktree Path") {
+                    copy(worktree.path)
+                }
+            }
+
+            Divider()
+
             Button("Rename \"\(reference.name)\"…") {
                 guard let name = GitPrompt.renamedBranch(reference) else { return }
                 Task { await model.renameBranch(reference, to: name) }
@@ -1772,6 +1782,10 @@ struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
+            copyNameButton
+
+            Divider()
+
             Button("Delete Remote Branch \"\(reference.name)\"…", role: .destructive) {
                 Task { await model.deleteBranchWithConfirmation(reference) }
             }
@@ -1806,6 +1820,10 @@ struct ReferenceContextMenuItems: View {
                 Divider()
             }
 
+            copyNameButton
+
+            Divider()
+
             Button("Delete Tag \"\(reference.name)\"…", role: .destructive) {
                 guard GitPrompt.confirmDelete(
                     kind: "tag",
@@ -1817,8 +1835,14 @@ struct ReferenceContextMenuItems: View {
 
         case .other:
             Button("Copy Reference Name") {
-                copyReferenceName()
+                copy(reference.name)
             }
+        }
+    }
+
+    private var copyNameButton: some View {
+        Button(reference.kind == .tag ? "Copy Tag Name" : "Copy Branch Name") {
+            copy(reference.name)
         }
     }
 
@@ -1923,6 +1947,7 @@ struct ReferenceContextMenuItems: View {
         case .remoteBranch:
             guard let remoteBranch = reference.remoteBranchComponents,
                   remoteBranch.branch != "HEAD",
+                  !model.remoteDefaultBranchContains(reference),
                   model.remotes.contains(where: {
                       $0.name == remoteBranch.remote && $0.isGitHub
                   }) else { return nil }
@@ -1932,7 +1957,8 @@ struct ReferenceContextMenuItems: View {
             let candidates = model.references.filter { candidate in
                 guard referenceIDsAtCommit.contains(candidate.id),
                       let remoteBranch = candidate.remoteBranchComponents,
-                      remoteBranch.branch == reference.name else { return false }
+                      remoteBranch.branch == reference.name,
+                      !model.remoteDefaultBranchContains(candidate) else { return false }
                 return model.remotes.contains {
                     $0.name == remoteBranch.remote && $0.isGitHub
                 }
@@ -1949,10 +1975,13 @@ struct ReferenceContextMenuItems: View {
         }
     }
 
+    /// A local branch HEAD contains still gets the fast-forward to HEAD.
+    /// Any other reference HEAD contains has nothing to merge.
     private var canMergeIntoCurrent: Bool {
         !reference.isHead
             && !commitIsHead
             && model.branch != "detached HEAD"
+            && (reference.kind == .localBranch || !model.headContains(reference))
     }
 
     private var rebaseTargets: [GitReference] {
@@ -1963,6 +1992,7 @@ struct ReferenceContextMenuItems: View {
                 ($0.kind == .localBranch || $0.kind == .remoteBranch)
                     && !referenceIDsAtCommit.contains($0.id)
                     && !$0.name.hasSuffix("/HEAD")
+                    && model.canRebase(reference, onto: $0)
             }
             .sorted { lhs, rhs in
                 if lhs.kind != rhs.kind {
@@ -1986,9 +2016,9 @@ struct ReferenceContextMenuItems: View {
             || model.hasPendingChangeOperations
     }
 
-    private func copyReferenceName() {
+    private func copy(_ string: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(reference.name, forType: .string)
+        NSPasteboard.general.setString(string, forType: .string)
     }
 }
 

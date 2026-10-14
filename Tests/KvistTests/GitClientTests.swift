@@ -248,7 +248,36 @@ final class GitClientTests: XCTestCase {
             references.targets,
             ["refs/heads/feature", "refs/remotes/origin/feature"]
         )
-        XCTAssertEqual(references.branchesBehindHead, ["refs/heads/main"])
+        XCTAssertEqual(
+            references.branchesBehindHead,
+            ["refs/heads/main", "refs/remotes/origin/main"]
+        )
+    }
+
+    func testFastForwardReferencesParserFindsBranchesDivergedFromEachLocalBranch() {
+        // Columns: HEAD, then refs/heads/feature, then refs/heads/main.
+        let output = """
+        refs/heads/feature\t0 0\t0 0\t1 1
+        refs/heads/main\t1 1\t1 1\t0 0
+        refs/heads/merged\t0 3\t0 3\t0 2
+        refs/remotes/origin/main\t2 1\t2 1\t1 0
+        """
+
+        let references = GitClient.parseFastForwardReferences(
+            output,
+            baseIDs: ["refs/heads/feature", "refs/heads/main"]
+        )
+
+        XCTAssertEqual(
+            references.divergedByBranch["refs/heads/feature"],
+            ["refs/heads/main", "refs/remotes/origin/main"]
+        )
+        XCTAssertEqual(references.divergedByBranch["refs/heads/main"], ["refs/heads/feature"])
+        XCTAssertNil(references.divergedByBranch["refs/heads/merged"])
+        XCTAssertEqual(
+            references.containedIn["refs/heads/main"],
+            ["refs/heads/main", "refs/heads/merged"]
+        )
     }
 
     @MainActor
@@ -513,6 +542,23 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(committed.staged.isEmpty)
         XCTAssertTrue(committed.unstaged.isEmpty)
         XCTAssertEqual(committed.graph.compactMap(\.commit).first?.subject, "Initial commit")
+    }
+
+    func testSnapshotListsCommitsOriginDoesNotHave() throws {
+        let originURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KvistUnpushedOrigin-\(UUID().uuidString).git")
+        defer { try? FileManager.default.removeItem(at: originURL) }
+        try commitFile("one.txt", "one")
+        try git(["init", "--bare", "-b", "main", originURL.path])
+        try git(["remote", "add", "origin", originURL.path])
+        try git(["push", "origin", "HEAD:main"])
+        try commitFile("two.txt", "two")
+        let unpushed = try git(["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let snapshot = try GitClient(repositoryURL: repositoryURL).snapshot()
+
+        XCTAssertEqual(snapshot.commitsMissingFromOrigin, [unpushed])
     }
 
     func testSyncRebasesLocalCommitsBeforePushing() throws {
