@@ -533,6 +533,51 @@ final class WorkspaceTabsModelTests: XCTestCase {
         XCTAssertNil(tabsModel.checkoutRegistry.checkout(id: linkedID))
     }
 
+    func testWorktreeRemovedOutsideKvistClosesItsTabWithoutAnError() async throws {
+        let (mainURL, linkedURL) = try makeRepositoryWithLinkedWorktree()
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [mainURL, linkedURL],
+            persistenceEnabled: false
+        )
+        let mainTab = tabsModel.tabs[0]
+        let linkedTab = tabsModel.tabs[1]
+        tabsModel.select(linkedTab.id)
+        await waitForRepositoryLoad(in: linkedTab)
+        let linkedModel = linkedTab.model
+        let linked = try XCTUnwrap(linkedModel.worktrees.first { $0.branch == "feature" })
+        let linkedID = Checkout(worktree: linked).id
+
+        _ = try GitClient(repositoryURL: mainURL).run(["worktree", "remove", "--", linked.path])
+        await linkedModel.refresh()
+
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [mainTab.id])
+        XCTAssertEqual(tabsModel.activeTabID, mainTab.id)
+        XCTAssertNil(linkedModel.errorPresentation)
+        XCTAssertNil(tabsModel.checkoutRegistry.checkout(id: linkedID))
+    }
+
+    func testWorktreeRemovedOutsideKvistClosesItsBackgroundTab() async throws {
+        let (mainURL, linkedURL) = try makeRepositoryWithLinkedWorktree()
+        let tabsModel = WorkspaceTabsModel(
+            defaults: isolatedDefaults(),
+            restoredRepositoryURLs: [mainURL, linkedURL],
+            persistenceEnabled: false
+        )
+        let mainTab = tabsModel.tabs[0]
+        let linkedTab = tabsModel.tabs[1]
+        tabsModel.select(linkedTab.id)
+        await waitForRepositoryLoad(in: linkedTab)
+        tabsModel.select(mainTab.id)
+        await waitForRepositoryLoad(in: mainTab)
+
+        _ = try GitClient(repositoryURL: mainURL).run(["worktree", "remove", "--", linkedURL.path])
+        await mainTab.model.refresh()
+
+        XCTAssertEqual(tabsModel.tabs.map(\.id), [mainTab.id])
+        XCTAssertNil(mainTab.model.errorPresentation)
+    }
+
     func testWorktreeTabsShareOneTopLevelEntryThatMovesClosesAndRestoresTogether() async throws {
         let mainURL = try temporaryDirectory()
         let linkedURL = mainURL.deletingLastPathComponent()
@@ -770,6 +815,26 @@ final class WorkspaceTabsModelTests: XCTestCase {
             defaults.stringArray(forKey: "recentRepositoryPaths"),
             [missingPath]
         )
+    }
+
+    /// A repository with one commit and a linked worktree on `feature`
+    /// beside it. Both folders are deleted when the test ends.
+    private func makeRepositoryWithLinkedWorktree() throws -> (main: URL, linked: URL) {
+        let mainURL = try temporaryDirectory()
+        let linkedURL = mainURL.deletingLastPathComponent()
+            .appendingPathComponent(mainURL.lastPathComponent + "-linked", isDirectory: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: mainURL)
+            try? FileManager.default.removeItem(at: linkedURL)
+        }
+        try GitClient.initializeRepository(at: mainURL, createGitIgnore: false)
+        let client = GitClient(repositoryURL: mainURL)
+        _ = try client.run([
+            "-c", "user.name=Kvist Test", "-c", "user.email=kvist@example.invalid",
+            "commit", "--allow-empty", "-m", "Initial"
+        ])
+        try client.addWorktree(path: linkedURL.path, branch: "feature")
+        return (mainURL, linkedURL)
     }
 
     private func isolatedDefaults() -> UserDefaults {

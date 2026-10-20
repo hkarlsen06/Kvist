@@ -94,6 +94,23 @@ final class RepositoryTab: ObservableObject, Identifiable {
         pendingRestorationState?.editor?.isDirty == true
     }
 
+    fileprivate var hasUnsavedEdits: Bool {
+        hasRecoveredDraft || storedModel?.hasAnyUnsavedRepositoryFileChanges == true
+    }
+
+    /// Whether the tab shows a linked worktree on this Mac whose `.git` file
+    /// is gone while the folder that held it is still there. That rules out
+    /// an unmounted drive.
+    fileprivate var showsRemovedLocalWorktree: Bool {
+        guard let repositoryPath,
+              let main = worktrees.first, main.sshHost == nil, !shows(main) else { return false }
+        let url = URL(fileURLWithPath: repositoryPath, isDirectory: true)
+        let fileManager = FileManager.default
+        return !fileManager.fileExists(atPath: url.appendingPathComponent(".git").path)
+            && fileManager.fileExists(atPath: url.deletingLastPathComponent().path)
+            && fileManager.fileExists(atPath: main.path)
+    }
+
     /// Asks before closing a tab with unsaved edits. A restored tab that was
     /// never shown keeps its recovered draft only in the restoration state.
     fileprivate func confirmDiscardChanges() -> Bool {
@@ -418,6 +435,11 @@ final class WorkspaceTabsModel: ObservableObject {
             }
             oldTab.deactivate()
         }
+        // Closing the tab selects another, which lands back here.
+        if activeTab.showsRemovedLocalWorktree,
+           closeRemovedWorktreeTabs([activeTab]) {
+            return
+        }
         activate(activeTab)
         forwardActiveModelChanges()
     }
@@ -425,6 +447,10 @@ final class WorkspaceTabsModel: ObservableObject {
     func activateInitialTab() {
         guard !hasActivatedInitialTab else { return }
         hasActivatedInitialTab = true
+        let initialTabID = activeTabID
+        closeRemovedWorktreeTabs(tabs.filter(\.showsRemovedLocalWorktree))
+        // Closing the active tab already activated another.
+        guard activeTabID == initialTabID else { return }
         forwardActiveModelChanges()
         activate(activeTab)
     }
@@ -708,6 +734,26 @@ final class WorkspaceTabsModel: ObservableObject {
         return true
     }
 
+    /// Closes the tabs of linked worktrees removed outside Kvist, such as by
+    /// an agent cleaning up after itself, and returns whether it closed any.
+    /// A tab with unsaved edits stays open so the user can copy them.
+    @discardableResult
+    private func closeRemovedWorktreeTabs(_ candidates: [RepositoryTab]) -> Bool {
+        let removedTabs = candidates.filter { tab in
+            !tab.hasUnsavedEdits && tabs.contains { $0 === tab }
+        }
+        guard !removedTabs.isEmpty else { return false }
+        let checkoutIDs = removedTabs.compactMap(\.checkout?.id)
+        if let active = removedTabs.first(where: { $0.id == activeTabID }),
+           let main = active.worktrees.first,
+           !removedTabs.contains(where: { $0.shows(main) }) {
+            switchToWorktree(main)
+        }
+        closeTabs(removedTabs)
+        checkoutIDs.forEach(checkoutRegistry.remove)
+        return true
+    }
+
     func select(_ tabID: UUID) {
         guard tabID != activeTabID,
               tabs.contains(where: { $0.id == tabID }) else { return }
@@ -902,6 +948,10 @@ final class WorkspaceTabsModel: ObservableObject {
         model.removeWorktreeAndTabs = { [weak self] in
             await self?.removeWorktree($0, force: $1) ?? false
         }
+        model.linkedWorktreeDidDisappear = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.closeRemovedWorktreeTabs([tab])
+        }
         repositorySubscriptions[tab.id] = [
             model.$repositoryURL
                 .dropFirst()
@@ -927,6 +977,9 @@ final class WorkspaceTabsModel: ObservableObject {
                     self.objectWillChange.send()
                     tab.worktrees = grouped
                     self.persistTabs()
+                    // Git drops a worktree from the list once it is
+                    // removed, which reaches tabs that are not shown.
+                    self.closeRemovedWorktreeTabs(self.tabs.filter(\.showsRemovedLocalWorktree))
                 },
             // Registers the tab's checkouts and reads its origin. The
             // publishers fire before the model stores a value, and a load

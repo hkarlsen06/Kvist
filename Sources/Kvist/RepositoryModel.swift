@@ -289,6 +289,12 @@ final class RepositoryModel: ObservableObject {
     /// Set by the workspace to remove a worktree and close its tabs. The
     /// flag forces removal of a worktree with changes.
     var removeWorktreeAndTabs: ((GitWorktree, Bool) async -> Bool)?
+    /// Set by the workspace to close the tab when this linked worktree is
+    /// removed outside Kvist, such as by an agent's `git worktree remove`.
+    var linkedWorktreeDidDisappear: (() -> Void)?
+    /// Read while the folder exists, since a path standardizes differently
+    /// once it is gone.
+    private var isLinkedWorktree = false
 
     init(
         initialRepositoryURL: URL? = nil,
@@ -1232,9 +1238,12 @@ final class RepositoryModel: ObservableObject {
             repositorySnapshotLoadTask = nil
             if !(error is CancellationError),
                snapshotRequestID == requestID,
-               self.repositoryURL == repositoryURL,
-               presentsErrors {
-                present(error)
+               self.repositoryURL == repositoryURL {
+                if isRemovedLinkedWorktree(after: error) {
+                    linkedWorktreeDidDisappear?()
+                } else if presentsErrors {
+                    present(error)
+                }
             }
         }
 
@@ -1292,7 +1301,11 @@ final class RepositoryModel: ObservableObject {
             workingTreeSnapshotLoadTask = nil
             if !(error is CancellationError),
                self.repositoryURL == repositoryURL {
-                present(error)
+                if isRemovedLinkedWorktree(after: error) {
+                    linkedWorktreeDidDisappear?()
+                } else {
+                    present(error)
+                }
             }
         }
         isRefreshInProgress = false
@@ -2176,6 +2189,13 @@ final class RepositoryModel: ObservableObject {
 
     var hasUnsavedRepositoryFileChanges: Bool {
         isRepositoryFileDirty || repositoryFileSession?.isDirty == true
+    }
+
+    /// Also counts an edit whose dirty flag the editor has not published
+    /// yet, for closing a tab without asking.
+    var hasAnyUnsavedRepositoryFileChanges: Bool {
+        hasUnsavedRepositoryFileChanges
+            || (detailKind == .source && repositoryFileText != savedRepositoryFileText)
     }
 
     var canSaveRepositoryFile: Bool {
@@ -4330,6 +4350,23 @@ final class RepositoryModel: ObservableObject {
         }.value
     }
 
+    /// Whether a failed refresh means this linked worktree was removed. Git
+    /// fails as soon as the worktree's `.git` file is gone, which can be
+    /// before the rest of the folder. A worktree on a drive that is not
+    /// mounted, or one the SSH user may not read, still exists.
+    private func isRemovedLinkedWorktree(after error: Error) -> Bool {
+        guard isLinkedWorktree, let repositoryURL else { return false }
+        guard sshRepository == nil else {
+            let output = (error as? GitCommandError)?.output ?? ""
+            return output.contains("not a git repository")
+                || (output.contains("cannot change to") && output.contains("No such file or directory"))
+        }
+        let fileManager = FileManager.default
+        return !fileManager.fileExists(atPath: repositoryURL.appendingPathComponent(".git").path)
+            && fileManager.fileExists(atPath: repositoryURL.deletingLastPathComponent().path)
+            && worktrees.first.map { fileManager.fileExists(atPath: $0.path) } == true
+    }
+
     func isCurrentWorktree(_ worktree: GitWorktree) -> Bool {
         if let sshRepository {
             return worktree.path == sshRepository.path
@@ -4345,6 +4382,7 @@ final class RepositoryModel: ObservableObject {
     ) {
         if self.remotes != remotes { self.remotes = remotes }
         if self.worktrees != worktrees { self.worktrees = worktrees }
+        isLinkedWorktree = worktrees.dropFirst().contains(where: isCurrentWorktree)
         if remotes.isEmpty {
             autoFetchTask?.cancel()
             autoFetchTask = nil
