@@ -15,6 +15,8 @@ KVIST_SIGNING_IDENTITY="Developer ID Application: Hjalmar Karlsen (48ZSLD4RMP)" 
 open -a /Applications/Kvist.app
 ```
 
+Only the main agent packages, installs or drives the installed app. There is one `/Applications/Kvist.app` and one defaults domain, so pstack subagents, swarm workers and arena runners check their work with `swift test --filter` in their own worktree, and the main agent installs once after it integrates their work.
+
 Quit Kvist normally rather than with `kill`, so it saves open tabs and editor drafts. `package.sh` stages the app beside the target and swaps it in, so do not `rm` or `ditto` into the bundle yourself. Without `KVIST_SIGNING_IDENTITY` the build is ad-hoc signed, and an ad-hoc install cannot use the in-app updater. If `security find-identity -v -p codesigning` lists no Developer ID identity, drop the variable to build ad-hoc and tell the user the installed copy cannot update itself. A running Kvist keeps the old code until it relaunches.
 
 The build needs full Xcode. The asset catalog uses `actool`, which the Command Line Tools lack. If `swift build` fails on `actool`, prefix the command with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and leave `xcode-select` alone.
@@ -185,12 +187,3 @@ Cut AI tells from all prose you write or edit, including docs, comments, release
 31. **Prefer the plain word.** "utilize" becomes "use", "leverage" becomes "use", "facilitate" becomes "help", "numerous" becomes "many", "in the event that" becomes "if". The fancier synonym is rarely clearer.
 32. **Mannered prose.** Metaphor or flourish where a literal phrase exists: aphorisms ("wire it or delete it"), rhetorical fragments for effect, personified code ("the plan holds it"), figurative verbs ("rides along", "stands on"), stock framing phrases. "A dial worth turning" becomes "a parameter worth varying". Say what you mean. Rule 26 covers the metaphor nouns.
 33. **Over-compression.** Dropped articles, verbless fragments, symbol-speak, and abbreviations that make the reader decode instead of read. "Parser rejects bad date → exit 2, no write" becomes "The parser rejects a bad date, exits with code 2, and writes nothing." Write whole sentences with their articles and verbs, and spell out arrows and abbreviations.
-
-# Bro keep going
-
-Before you stop, ask yourself "is there a next step that the user would want me to do?" if so, keep going jobs not finished.
-
-## Keep going without input
-
-When a step doesn't need my input, keep going. Put status notes in the same message as your next action.
-Stop and ask only when you can't continue without me, or before anything destructive: deleting data, force-pushing, or changing anything outside this repository.
