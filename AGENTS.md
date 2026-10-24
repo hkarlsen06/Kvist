@@ -19,6 +19,8 @@ Only the main agent packages, installs or drives the installed app. There is one
 
 Quit Kvist normally rather than with `kill`, so it saves open tabs and editor drafts. `package.sh` stages the app beside the target and swaps it in, so do not `rm` or `ditto` into the bundle yourself. Without `KVIST_SIGNING_IDENTITY` the build is ad-hoc signed, and an ad-hoc install cannot use the in-app updater. If `security find-identity -v -p codesigning` lists no Developer ID identity, drop the variable to build ad-hoc and tell the user the installed copy cannot update itself. A running Kvist keeps the old code until it relaunches.
 
+If the login keychain loses the Developer ID identity or the `kvist-notary` profile, rebuild them from `~/Lokalt/Secrets/Kvist/`, which holds the private key, the matching certificate, and the App Store Connect API key (`AuthKey_<key id>.p8`). Ask the user for the notary issuer ID, and never copy anything from that folder into the repository. Import the certificate and key with `security import ... -T /usr/bin/codesign` and run `security set-key-partition-list -S 'apple-tool:,apple:,codesign:'`. Any Developer ID certificate on team 48ZSLD4RMP works. Notary error 401 means a wrong or missing issuer. A 403 "provider does not exist" has appeared during App Store Connect maintenance with valid credentials, so check Apple's system status before you change credentials.
+
 The build needs full Xcode. The asset catalog uses `actool`, which the Command Line Tools lack. If `swift build` fails on `actool`, prefix the command with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and leave `xcode-select` alone.
 
 Run tests with:
@@ -84,6 +86,23 @@ accessory stack with `fittingSize`; guessed heights or intrinsic placeholder
 widths clip multi-row forms. Clear the Return key equivalent on destructive
 buttons unless a primary action is present.
 
+An `NSAlert` keeps its accessory container at the first layout size. When a
+disclosure grows the accessory, call `alert.layout()`, or the expanded content
+gets no clicks and drags the window instead. Prefer plain informative text to a
+scroll view inside a prompt. Scrolling a text view in a modal alert lags, and
+the cause is unknown.
+
+## Window dragging
+
+The tab strip sits in the titlebar region (`fullSizeContentView`), where the
+window server moves the window on ⌘-drag and some plain drags no matter what the
+app does. `window.isMovable = false` in `App.swift` turns that off, so every
+draggable region must call `performDrag(with:)` itself: `WindowDragArea` for the
+tab bar and `WindowDragHandle` for `ChangesActionBar`. Give new toolbar-like
+rows a `WindowDragHandle` background. Do not revert `isMovable = false` without
+retesting tab dragging. If `locationInWindow` stays constant while the window
+follows the pointer, the window server is dragging the window.
+
 ## Tab performance benchmark
 
 Run `Scripts/benchmark-tabs.sh` after changes to repository tabs, workspace
@@ -105,7 +124,14 @@ leak. A 300-cycle run settled at 18.5 MiB, so memory keeps growing with more
 switches and does not level off. Do not raise that limit to make a run pass.
 Judge a tab change by the unopened and loaded switch times, the main-thread
 stall, and the orphan counts. If another metric fails, measure `main` the same
-day before you blame the change.
+day before you blame the change. To run more cycles, change `rapidCycleCount`
+in `Sources/Kvist/PerformanceInstrumentation.swift` and the matching `== 100`
+check in `Sources/KvistBenchmark/main.swift`.
+
+Launch benchmarks only through the scripts. Starting the app binary with
+`KVIST_PERFORMANCE_MODE` from an agent shell never presents a window. When the
+full benchmark cannot run, time the changed Git commands directly on
+`../paeonia` and `../tidex` and compare 30-run medians.
 
 ## Verifying in the running app
 
@@ -117,11 +143,21 @@ Screenshot only Kvist's window with `screencapture -x -o -l<window number>`.
 - Prefer checking side effects over screenshots. `WorkspaceTabsModel` writes
   `openRepositoryPaths` and `activeRepositoryPath` to defaults as soon as a tab
   is selected or moved. `restoredWorkspaceV2` takes precedence on restore, so
-  delete it when you seed tabs.
+  delete it when you seed tabs. Ignore `~/Library/Preferences/Kvist.plist`,
+  which is a stale leftover.
 - A second instance (`open -n`) shares the user's defaults and rewrites their
   saved workspace. Run `defaults export com.hjalmarkarlsen.Kvist
   /tmp/kvist-defaults.plist` first, and afterwards delete only the keys the
   test changed.
+- Synthesize input with a Swift script that posts `CGEvent` mouse events at
+  global top-left coordinates. Set `event.flags = .maskCommand` on the down,
+  dragged, and up events to hold ⌘ through a drag, which Computer Use cannot
+  do. Events posted with `postToPid` do not reach a modal `NSAlert` in an
+  inactive app, so clicking a dialog needs the user or an event that moves the
+  cursor.
+- The tab strip is the top 34 points of the window and tabs start at x=78,
+  after the traffic lights, so grab a tab at y=17. ⌘, opens Settings as a
+  window about 700 by 608 points.
 - Read menus through the Accessibility API by PID
   (`AXUIElementCreateApplication`). AppleScript's `process whose unix id is N`
   resolves by name and can read the wrong instance. `AXPress` does not open a
